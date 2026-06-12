@@ -68,6 +68,37 @@ def prompt(text: str, *, cancel_words: bool = True) -> str:
     return value
 
 
+def read_key(text: str, *, cancel_keys: bool = True) -> str:
+    """Read one key without requiring Enter when running in a TTY."""
+    if not sys.stdin.isatty():
+        return prompt(text, cancel_words=cancel_keys)
+
+    print(text, end="", flush=True)
+    try:
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            value = sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    except KeyboardInterrupt as exc:
+        raise UserCancelled from exc
+
+    if value == "\x03":
+        raise UserCancelled
+    if value in {"\r", "\n"}:
+        print()
+        return ""
+    print(value)
+    if cancel_keys and value.lower() in {"q", "\x1b"}:
+        raise UserCancelled
+    return value
+
+
 def handle_sigint(_signum: int, _frame: Any) -> None:
     print("\nCancelled.", file=sys.stderr)
     raise SystemExit(130)
@@ -732,6 +763,14 @@ def pick_from_rows(rows: list[dict[str, Any]], *, action: str = "dump") -> str:
         raise SystemExit("No sessions to pick from.")
     if not sys.stdin.isatty():
         raise SystemExit("Cannot prompt without a TTY. Pass a session id directly.")
+    if len(rows) <= 9:
+        choice = read_key(f"\nPress 1-{len(rows)} to {action}, or q to cancel: ").strip()
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(rows):
+                return str(rows[idx - 1]["id"])
+        if choice:
+            print("Unknown choice.")
     choice = prompt(f"\nEnter number or session id to {action} (q to cancel): ").strip()
     if choice.isdigit():
         idx = int(choice)
@@ -1357,6 +1396,20 @@ def prompt_for_session(action: str) -> str:
     rows = list_sessions(20)
     print(f"\nRecent sessions for {action}:")
     print_sessions(rows)
+    if sys.stdin.isatty() and 0 < len(rows) <= 9:
+        print("\nPress 1-9 for a session, / to search, or q to cancel.")
+        value = read_key(f"{action}> ").strip()
+        if value.isdigit():
+            idx = int(value)
+            if 1 <= idx <= len(rows):
+                return str(rows[idx - 1]["id"])
+        if value == "/":
+            query = prompt("Search text: ").strip()
+            if not query:
+                raise SystemExit("Search text was empty.")
+            rows = search_sessions(query, scan_content=False)
+            return pick_from_rows(rows, action=action)
+        return value
     print("\nEnter a number, a session id/fragment, or /search text.")
     value = prompt(f"{action}> ").strip()
     if value.startswith("/"):
@@ -1374,7 +1427,7 @@ def prompt_for_session(action: str) -> str:
 
 def pause() -> None:
     if sys.stdin.isatty():
-        prompt("\nPress Enter to continue, or q to quit: ")
+        read_key("\nPress any key to continue, or q to quit: ")
 
 
 def pins_menu() -> None:
@@ -1382,7 +1435,7 @@ def pins_menu() -> None:
         print("\nPins")
         list_pins()
         print("\n[P] Pin session   [U] Unpin session   [Q] Back")
-        choice = prompt("pins> ", cancel_words=False).strip().lower()
+        choice = read_key("pins> ", cancel_keys=False).strip().lower()
         if choice in {"q", "quit", "back"}:
             return
         if choice in {"p", "pin"}:
@@ -1407,7 +1460,7 @@ def interactive_menu(args: argparse.Namespace, config_path: Path) -> int:
         print("[L] Largest sessions        [F] Find sessions")
         print("[H] Doctor report           [N] Pins")
         print("[C] Configure               [Q] Quit")
-        choice = prompt("lifeboat> ", cancel_words=False).strip().lower()
+        choice = read_key("lifeboat> ", cancel_keys=False).strip().lower()
         try:
             if choice in {"q", "quit", "exit"}:
                 return 0

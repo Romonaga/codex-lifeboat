@@ -96,7 +96,12 @@ The menu gives you:
 
 When selecting a session, you can enter a table number, a session id, an id fragment, or `/search text`.
 
-`q`, `quit`, `exit`, and `Ctrl-C` cancel interactive prompts.
+Keyboard controls:
+
+- Menu letters act immediately. Press `D`, `S`, `A`, `P`, `L`, `F`, `H`, `N`, `C`, or `Q`; Enter is not required.
+- Session pickers with 9 or fewer choices accept `1` through `9` immediately.
+- Larger pickers still use Enter so two-digit selections and ID fragments are possible.
+- `q`, `quit`, `exit`, `Esc`, and `Ctrl-C` cancel interactive prompts.
 
 ## Recovery Commands
 
