@@ -101,6 +101,7 @@ Keyboard controls:
 - Menu letters act immediately. Press `D`, `S`, `A`, `P`, `L`, `F`, `H`, `N`, `C`, or `Q`; Enter is not required.
 - Session pickers with 9 or fewer choices accept `1` through `9` immediately.
 - Larger pickers still use Enter so two-digit selections and ID fragments are possible.
+- Menu screens redraw after actions, keeping completed prompts and reports from cluttering the next choice.
 - `q`, `quit`, `exit`, `Esc`, and `Ctrl-C` cancel interactive prompts.
 
 ## Recovery Commands

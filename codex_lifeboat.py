@@ -1392,6 +1392,11 @@ def print_banner() -> None:
     print("+------------------------------------------------------------+")
 
 
+def clear_screen() -> None:
+    if sys.stdout.isatty():
+        print("\033[2J\033[H", end="", flush=True)
+
+
 def prompt_for_session(action: str) -> str:
     rows = list_sessions(20)
     print(f"\nRecent sessions for {action}:")
@@ -1432,6 +1437,7 @@ def pause() -> None:
 
 def pins_menu() -> None:
     while True:
+        clear_screen()
         print("\nPins")
         list_pins()
         print("\n[P] Pin session   [U] Unpin session   [Q] Back")
@@ -1450,7 +1456,7 @@ def pins_menu() -> None:
 
 def interactive_menu(args: argparse.Namespace, config_path: Path) -> int:
     while True:
-        print()
+        clear_screen()
         print_banner()
         print(f"Codex home: {CODEX_HOME}")
         print(f"Output dir: {OUTPUT_DIR}")
