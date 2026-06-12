@@ -584,13 +584,26 @@ def codex_sessions_size() -> int:
     return total
 
 
+HUGE_SESSION_BYTES = 500 * 1024 * 1024
+IMPOSSIBLE_TOKEN_COUNT = 100_000_000
+
+
+def risk_reasons(row: dict[str, Any]) -> list[str]:
+    reasons = []
+    if session_size(row) >= HUGE_SESSION_BYTES:
+        reasons.append(f"rollout >= {human_size(HUGE_SESSION_BYTES)}")
+    if int(row.get("tokens_used") or 0) > IMPOSSIBLE_TOKEN_COUNT:
+        reasons.append(f"tokens > {IMPOSSIBLE_TOKEN_COUNT:,}")
+    return reasons
+
+
 def doctor_report() -> str:
     rows = all_sessions()
     pins = load_pins()
     missing = [row for row in rows if row.get("rollout_path") and not Path(row["rollout_path"]).exists()]
     orphan = [row for row in rows if row.get("orphan")]
-    impossible = [row for row in rows if int(row.get("tokens_used") or 0) > 100_000_000]
-    huge = [row for row in rows if session_size(row) >= 500 * 1024 * 1024]
+    impossible = [row for row in rows if int(row.get("tokens_used") or 0) > IMPOSSIBLE_TOKEN_COUNT]
+    huge = [row for row in rows if session_size(row) >= HUGE_SESSION_BYTES]
     largest = sorted(rows, key=session_size, reverse=True)[:10]
     log_size = sum(path.stat().st_size for path in log_dbs() if path.exists())
 
@@ -603,35 +616,44 @@ def doctor_report() -> str:
         f"- Pinned sessions: `{len(pins)}`",
         f"- Rollout storage: `{human_size(codex_sessions_size())}`",
         f"- Log DB storage: `{human_size(log_size)}`",
-        f"- Huge sessions >= 500M: `{len(huge)}`",
-        f"- Impossible token counters > 100M: `{len(impossible)}`",
+        f"- Huge sessions >= {human_size(HUGE_SESSION_BYTES)}: `{len(huge)}`",
+        f"- Impossible token counters > {IMPOSSIBLE_TOKEN_COUNT:,}: `{len(impossible)}`",
         f"- Missing rollout paths: `{len(missing)}`",
         f"- Orphan rollout files: `{len(orphan)}`",
         "",
     ]
 
-    def table(title: str, items: list[dict[str, Any]]) -> None:
+    def table(title: str, items: list[dict[str, Any]], include_reason: bool = False) -> None:
         lines.append(f"## {title}")
         lines.append("")
         if not items:
             lines.append("None.")
             lines.append("")
             return
-        lines.append("| Size | Tokens | Pinned | Session | Title |")
-        lines.append("| ---: | ---: | :---: | --- | --- |")
+        if include_reason:
+            lines.append("| Size | Tokens | Pinned | Reason | Session | Title |")
+            lines.append("| ---: | ---: | :---: | --- | --- | --- |")
+        else:
+            lines.append("| Size | Tokens | Pinned | Session | Title |")
+            lines.append("| ---: | ---: | :---: | --- | --- |")
         for row in items:
             sid = str(row.get("id") or "")
             title_text = (row.get("title") or row.get("preview") or "").replace("|", "\\|").replace("\n", " ")
             if len(title_text) > 90:
                 title_text = title_text[:87] + "..."
-            lines.append(
+            prefix = (
                 f"| {human_size(session_size(row))} | {int(row.get('tokens_used') or 0)} | "
-                f"{'yes' if sid in pins else ''} | `{sid}` | {title_text} |"
+                f"{'yes' if sid in pins else ''} |"
             )
+            if include_reason:
+                reason = ", ".join(risk_reasons(row)) or "unknown"
+                lines.append(f"{prefix} {reason} | `{sid}` | {title_text} |")
+            else:
+                lines.append(f"{prefix} `{sid}` | {title_text} |")
         lines.append("")
 
     table("Largest Sessions", largest)
-    table("Likely Risky Sessions", sorted(set_rows(huge + impossible), key=session_size, reverse=True))
+    table("Likely Risky Sessions", sorted(set_rows(huge + impossible), key=session_size, reverse=True), include_reason=True)
     table("Missing Rollout Paths", missing)
     table("Orphan Rollout Files", orphan)
     return "\n".join(lines)

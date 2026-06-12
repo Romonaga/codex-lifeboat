@@ -178,7 +178,7 @@ Write it to a file:
 codex-lifeboat --doctor -o ~/codex-lifeboat-dumps/doctor.md
 ```
 
-The report highlights storage size, huge sessions, impossible token counters, missing rollout paths, orphan rollout files, and pinned sessions.
+The report highlights storage size, huge sessions, impossible token counters, missing rollout paths, orphan rollout files, and pinned sessions. Risky sessions include a `Reason` column showing which threshold matched.
 
 ## Pins
 
