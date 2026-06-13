@@ -2,17 +2,25 @@
 
 Agent Lifeboat is a local rescue tool for AI coding-agent sessions that have become too large, slow, or painful to resume.
 
-It currently supports Codex and Claude Code sessions. It helps you browse sessions, dump a paste-ready handoff, create a compact recovery summary, archive the raw session file, pin sessions you care about, and purge stale sessions only after you have something you can feed into a fresh AI session.
+It currently supports Codex and Claude Code sessions. It helps you browse sessions, inspect recovery readiness, dump a paste-ready handoff, create a compact recovery summary, archive the raw session file, export a resume package, pin sessions you care about, and purge stale sessions only after you have something you can feed into a fresh AI session.
 
 ## What It Does
 
 - Textual terminal application for normal use.
 - Agent selector for Codex or Claude Code.
+- Project and readiness grouping.
+- Recovery readiness labels for missing, partial, handoff-needed, and ready sessions.
+- Handoff history detection for generated handoffs, summaries, archives, and resume packages.
+- Rich transcript preview with latest user request, latest assistant result, commands, paths, blockers, and transcript counts.
+- Compare view for two visible sessions.
 - Full Markdown handoff for pasting into a fresh AI session.
 - Compact recovery summary focused on goals, paths, commands, blockers, and recent context.
+- Resume package export with handoff, summary, archive, and metadata.
+- Target-agent handoff notes for Codex-to-Codex, Codex-to-Claude, Claude-to-Claude, and Claude-to-Codex recovery.
+- Scrub profiles for private, shareable, and public recovery artifacts.
+- Guarded handoff injection that appends a compact recovery note to a session file only after creating a backup.
 - Doctor report for local agent session health.
-- Largest-session view to find the sessions most likely to cause trouble.
-- Session search by title, preview, cwd, session id, session file path, or optional file contents.
+- Filter search by text or `agent:`, `project:`, `cwd:`, `model:`, `status:`, `file:`, and `artifact:`.
 - Pins to protect important sessions from bulk purge.
 - Archive mode that stores session JSONL plus metadata in `tar.gz`.
 - Safe purge with dry-run, confirmation, automatic handoff by default, and optional archive.
@@ -68,11 +76,16 @@ The code is split by domain:
 - `codex_lifeboat/agents.py`: agent detection and backend selection.
 - `codex_lifeboat/sessions.py`: Codex session discovery, lookup, search, and size accounting.
 - `codex_lifeboat/claude.py`: Claude Code session discovery and transcript normalization.
+- `codex_lifeboat/intelligence.py`: transcript preview, project grouping, filters, and recovery readiness.
+- `codex_lifeboat/artifacts.py`: generated handoff, summary, archive, and resume-package history.
 - `codex_lifeboat/handoff.py`: full handoffs, compact summaries, splitting, and secret scanning.
+- `codex_lifeboat/recovery.py`: reusable recovery actions, scrub profiles, target-agent notes, resume export, and injection.
 - `codex_lifeboat/doctor.py`: health reports and risk classification.
 - `codex_lifeboat/pins.py`: pinned session storage.
 - `codex_lifeboat/operations.py`: archive and purge operations.
-- `codex_lifeboat/tui.py`: Textual terminal UI.
+- `codex_lifeboat/controller.py`: app orchestration that keeps feature logic out of the UI.
+- `codex_lifeboat/views.py`: Markdown rendering for details, compare, bulk plans, and action results.
+- `codex_lifeboat/tui.py`: Textual widget and event hooks.
 
 ## First Run
 
@@ -99,7 +112,25 @@ Run the program:
 agent-lifeboat
 ```
 
-The terminal app provides a bordered session explorer, an agent selector, search, pinned-session state, full handoff generation, compact summary generation, archive, guarded purge, and the doctor report.
+The terminal app provides a bordered session explorer, an agent selector, project/readiness grouping, filtered search, pinned-session state, readiness status, artifact history, full handoff generation, compact summary generation, archive, resume export, guarded injection, guarded purge, and the doctor report.
+
+Common keys:
+
+```text
+h        write full handoff
+s        write compact summary
+a        archive session file
+e        export resume package
+i        inject compact recovery note after backup
+c        compare two sessions
+b        show bulk cleanup plan
+p        toggle pin
+x        dry-run purge
+ctrl+x   purge after two-step confirmation
+d        doctor report
+```
+
+Injection is intentionally conservative. It writes a compact recovery summary, backs up the session JSONL beside the original file, and appends a clearly marked synthetic user message. If an agent changes its session format, restore from the backup.
 
 Full handoffs start with a `Continuation Snapshot` before the chronological transcript. That front-loads the latest user requests, assistant results, commands, paths, and blockers without internal tool trace details, so a new session can recover current state even if a reader or tool only shows the beginning of the file.
 
@@ -118,6 +149,14 @@ Run from the repo:
 ```bash
 python3 -m codex_lifeboat.tui
 ```
+
+Build a standalone executable with PyInstaller:
+
+```bash
+scripts/build-standalone.sh
+```
+
+The standalone binary is written to `dist/agent-lifeboat`. This is optional; the normal installed program remains `agent-lifeboat`.
 
 ## License
 

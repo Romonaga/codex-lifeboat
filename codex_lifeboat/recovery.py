@@ -1,0 +1,243 @@
+from __future__ import annotations
+
+import datetime as dt
+import json
+import shutil
+import tarfile
+from dataclasses import dataclass
+from io import BytesIO
+from pathlib import Path
+from typing import Any
+
+from .config import AppConfig
+from .handoff import (
+    HandoffOptions,
+    WriteResult,
+    default_output_path,
+    write_claude_handoff,
+    write_claude_summary,
+    write_handoff,
+    write_summary,
+)
+from .operations import archive_session
+
+
+SCRUB_PROFILES = ("private", "shareable", "public")
+TARGET_AGENTS = ("same", "codex", "claude")
+
+
+@dataclass(frozen=True)
+class RecoveryContext:
+    agent_key: str
+    session_id: str
+    session_file_path: Path
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class InjectionResult:
+    session_file_path: Path
+    backup_path: Path
+    source_path: Path
+    injected_chars: int
+
+
+def options_for_profile(profile: str) -> HandoffOptions:
+    if profile == "private":
+        return HandoffOptions(redact=True, include_tools=True, tool_chars=6000)
+    if profile == "public":
+        return HandoffOptions(redact=True, include_tools=False, message_chars=6000)
+    return HandoffOptions(redact=True, include_tools=False)
+
+
+def target_agent_name(source_agent: str, target_agent: str) -> str:
+    if target_agent == "same":
+        target_agent = source_agent
+    return "Claude" if target_agent == "claude" else "Codex"
+
+
+def write_agent_handoff(
+    config: AppConfig,
+    context: RecoveryContext,
+    *,
+    scrub_profile: str = "shareable",
+    target_agent: str = "same",
+) -> WriteResult:
+    output_path = default_output_path(config, context.session_id, summary=False, agent_key=context.agent_key)
+    options = options_for_profile(scrub_profile)
+    if context.agent_key == "claude":
+        result = write_claude_handoff(
+            session_id=context.session_id,
+            session_file_path=context.session_file_path,
+            metadata={**context.metadata, "target_agent": target_agent_name(context.agent_key, target_agent)},
+            output_path=output_path,
+            options=options,
+        )
+    else:
+        result = write_handoff(
+            session_id=context.session_id,
+            rollout_path=context.session_file_path,
+            metadata={**context.metadata, "target_agent": target_agent_name(context.agent_key, target_agent)},
+            output_path=output_path,
+            options=options,
+        )
+    append_target_note(result.path, context.agent_key, target_agent, scrub_profile)
+    return result
+
+
+def write_agent_summary(config: AppConfig, context: RecoveryContext, *, scrub_profile: str = "shareable") -> WriteResult:
+    output_path = default_output_path(config, context.session_id, summary=True, agent_key=context.agent_key)
+    redact = scrub_profile in {"private", "shareable", "public"}
+    if context.agent_key == "claude":
+        return write_claude_summary(
+            session_id=context.session_id,
+            session_file_path=context.session_file_path,
+            metadata=context.metadata,
+            output_path=output_path,
+            redact=redact,
+        )
+    return write_summary(
+        session_id=context.session_id,
+        rollout_path=context.session_file_path,
+        metadata=context.metadata,
+        output_path=output_path,
+        redact=redact,
+    )
+
+
+def append_target_note(path: Path, source_agent: str, target_agent: str, scrub_profile: str) -> None:
+    target = target_agent_name(source_agent, target_agent)
+    note = (
+        "\n## Target Agent\n\n"
+        f"- Target agent: `{target}`\n"
+        f"- Scrub profile: `{scrub_profile}`\n"
+        "- Use the same facts and constraints, but adapt command names and session-specific assumptions to the target agent.\n"
+    )
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(note)
+
+
+def write_resume_package(
+    config: AppConfig,
+    context: RecoveryContext,
+    *,
+    scrub_profile: str = "shareable",
+    target_agent: str = "same",
+) -> Path:
+    handoff = write_agent_handoff(config, context, scrub_profile=scrub_profile, target_agent=target_agent)
+    summary = write_agent_summary(config, context, scrub_profile=scrub_profile)
+    archive_path = archive_session(
+        context.session_id,
+        context.session_file_path,
+        {"agent": context.agent_key, **context.metadata},
+        config.output_dir / "archives",
+    )
+    package_dir = config.output_dir / "resume-packages"
+    package_dir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    prefix = context.session_id if context.agent_key == "codex" else f"{context.agent_key}-{context.session_id}"
+    package_path = package_dir / f"{prefix}-resume-{stamp}.tar.gz"
+    metadata = {
+        "agent": context.agent_key,
+        "target_agent": target_agent_name(context.agent_key, target_agent),
+        "session_id": context.session_id,
+        "session_file_path": str(context.session_file_path),
+        "created_at": stamp,
+        "scrub_profile": scrub_profile,
+        "handoff": str(handoff.path),
+        "summary": str(summary.path),
+        "archive": str(archive_path),
+        "metadata": context.metadata,
+    }
+    with tarfile.open(package_path, "w:gz") as tar:
+        for path in (handoff.path, summary.path, archive_path):
+            if path.exists():
+                tar.add(path, arcname=path.name)
+        if context.session_file_path.exists() and scrub_profile == "private":
+            tar.add(context.session_file_path, arcname=context.session_file_path.name)
+        info = tarfile.TarInfo("metadata.json")
+        body = json.dumps(metadata, indent=2).encode("utf-8")
+        info.size = len(body)
+        tar.addfile(info, fileobj=BytesIO(body))
+    return package_path
+
+
+def inject_handoff_note(
+    config: AppConfig,
+    context: RecoveryContext,
+    *,
+    scrub_profile: str = "shareable",
+    target_agent: str = "same",
+    max_chars: int = 8000,
+) -> InjectionResult:
+    summary = write_agent_summary(config, context, scrub_profile=scrub_profile)
+    text = summary.path.read_text(encoding="utf-8", errors="replace")
+    if len(text) > max_chars:
+        omitted = len(text) - max_chars
+        text = f"{text[:max_chars]}\n\n[... injection truncated {omitted} characters; full summary: {summary.path} ...]"
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = context.session_file_path.with_name(f"{context.session_file_path.name}.bak-{stamp}")
+    shutil.copy2(context.session_file_path, backup_path)
+    payload = build_injection_payload(context, text, target_agent=target_agent)
+    with context.session_file_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False))
+        handle.write("\n")
+    return InjectionResult(
+        session_file_path=context.session_file_path,
+        backup_path=backup_path,
+        source_path=summary.path,
+        injected_chars=len(text),
+    )
+
+
+def build_injection_payload(context: RecoveryContext, text: str, *, target_agent: str) -> dict[str, Any]:
+    stamp = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    header = (
+        "Injected Agent Lifeboat recovery note.\n\n"
+        f"Source agent: {context.agent_key}\n"
+        f"Target agent: {target_agent_name(context.agent_key, target_agent)}\n\n"
+    )
+    body = header + text
+    if context.agent_key == "claude":
+        return {
+            "type": "user",
+            "isMeta": False,
+            "timestamp": stamp,
+            "cwd": context.metadata.get("cwd") or "",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": body}],
+            },
+            "agent_lifeboat_injection": True,
+        }
+    return {
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": body}],
+            "agent_lifeboat_injection": True,
+            "timestamp": stamp,
+        },
+    }
+
+
+def bulk_cleanup_plan(rows: list[dict[str, Any]], row_states: dict[str, dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for row in rows:
+        sid = str(row.get("id") or "")
+        state = row_states.get(sid) or {}
+        readiness = state.get("readiness")
+        artifacts = state.get("artifacts")
+        if not readiness:
+            continue
+        title = str(row.get("title") or row.get("preview") or "Untitled").replace("\n", " ")[:70]
+        if readiness.label == "Missing":
+            lines.append(f"{sid} | missing transcript | restore file before cleanup | {title}")
+        elif artifacts and artifacts.has_handoff and artifacts.has_archive:
+            lines.append(f"{sid} | ready | can purge when intended | {title}")
+        elif artifacts and artifacts.has_handoff:
+            lines.append(f"{sid} | partial | archive before purge | {title}")
+        else:
+            lines.append(f"{sid} | needs handoff | generate handoff first | {title}")
+    return lines

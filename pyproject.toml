@@ -37,6 +37,11 @@ classifiers = [
   "Topic :: System :: Archiving"
 ]
 
+[project.optional-dependencies]
+standalone = [
+  "pyinstaller>=6.0"
+]
+
 [project.scripts]
 agent-lifeboat = "codex_lifeboat.tui:main"
 
