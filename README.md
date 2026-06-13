@@ -1,25 +1,32 @@
-# Codex Lifeboat
+# Agent Lifeboat
 
-Codex Lifeboat is a local rescue tool for Codex CLI sessions that have become too large, slow, or painful to resume.
+Agent Lifeboat is a local rescue tool for AI coding-agent sessions that have become too large, slow, or painful to resume.
 
-It helps you pick a session, dump a paste-ready handoff, create a compact recovery summary, archive the raw rollout, pin sessions you care about, and purge stale sessions only after you have something you can feed into a new Codex session.
+It currently supports Codex and Claude Code sessions. It helps you browse sessions, dump a paste-ready handoff, create a compact recovery summary, archive the raw session file, pin sessions you care about, and purge stale sessions only after you have something you can feed into a fresh AI session.
 
 ## What It Does
 
-- Menu-first ASCII interface for normal use.
-- Full Markdown handoff for pasting into a fresh Codex session.
+- Textual terminal application for normal use.
+- Agent selector for Codex or Claude Code.
+- Full Markdown handoff for pasting into a fresh AI session.
 - Compact recovery summary focused on goals, paths, commands, blockers, and recent context.
-- Doctor report for local Codex session health.
+- Doctor report for local agent session health.
 - Largest-session view to find the sessions most likely to cause trouble.
-- Session search by title, preview, cwd, session id, rollout path, or optional file contents.
+- Session search by title, preview, cwd, session id, session file path, or optional file contents.
 - Pins to protect important sessions from bulk purge.
-- Archive mode that stores rollout JSONL plus metadata in `tar.gz`.
+- Archive mode that stores session JSONL plus metadata in `tar.gz`.
 - Safe purge with dry-run, confirmation, automatic handoff by default, and optional archive.
 - Secret redaction by default, plus a scanner for generated handoff files.
 - First-run configuration so paths are not hardcoded.
 - Optional Markdown splitting for very large handoffs.
 
-No third-party Python packages are required.
+The app is built with Textual, so it stays in the terminal while still feeling like a proper program. Domain logic lives in reusable Python modules so the interface does not duplicate session, handoff, doctor, pin, archive, or purge behavior.
+
+## Session Files
+
+A session file is the local JSONL transcript for a conversation. Codex stores session files under `~/.codex`; Claude Code stores them under `~/.claude/projects`. If the session file is available, Lifeboat can build full handoffs, compact summaries, archives, and guarded purges from the transcript.
+
+If a Codex session file is missing, Lifeboat can still show the metadata Codex left in its SQLite index: title, preview, cwd, timestamps, token counter, session id, and the last known session file path. It cannot reconstruct the full transcript, tool outputs, or a real handoff without that JSONL file. Claude Code does not expose the same SQLite index here, so Claude recovery depends on the JSONL session file being present.
 
 ## Install
 
@@ -36,225 +43,80 @@ Quick local install:
 ./install.sh
 ```
 
-Or install as a Python command:
+The installer creates `.venv/`, installs the package with its Textual dependency, and writes an `agent-lifeboat` launcher to `~/.local/bin`.
+
+For a manual development install:
 
 ```bash
-python3 -m pip install .
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
 ```
 
 Then run:
 
 ```bash
-codex-lifeboat
+agent-lifeboat
 ```
+
+This launches the Textual terminal app.
+
+## Program Layout
+
+The code is split by domain:
+
+- `codex_lifeboat/config.py`: app configuration and paths.
+- `codex_lifeboat/agents.py`: agent detection and backend selection.
+- `codex_lifeboat/sessions.py`: Codex session discovery, lookup, search, and size accounting.
+- `codex_lifeboat/claude.py`: Claude Code session discovery and transcript normalization.
+- `codex_lifeboat/handoff.py`: full handoffs, compact summaries, splitting, and secret scanning.
+- `codex_lifeboat/doctor.py`: health reports and risk classification.
+- `codex_lifeboat/pins.py`: pinned session storage.
+- `codex_lifeboat/operations.py`: archive and purge operations.
+- `codex_lifeboat/tui.py`: Textual terminal UI.
 
 ## First Run
-
-Configure your Codex state directory and output directory:
-
-```bash
-codex-lifeboat --configure
-```
 
 Default config path:
 
 ```text
-~/.config/codex-lifeboat/config.json
+~/.config/agent-lifeboat/config.json
 ```
 
 Environment overrides:
 
 ```text
-CODEX_LIFEBOAT_CONFIG
-CODEX_LIFEBOAT_OUTPUT_DIR
+AGENT_LIFEBOAT_CONFIG
+AGENT_LIFEBOAT_OUTPUT_DIR
 CODEX_HOME
+CLAUDE_HOME
 ```
 
-Show the active config:
+## App Mode
+
+Run the program:
 
 ```bash
-codex-lifeboat --show-config
+agent-lifeboat
 ```
 
-## Menu Mode
+The terminal app provides a bordered session explorer, an agent selector, search, pinned-session state, full handoff generation, compact summary generation, archive, guarded purge, and the doctor report.
 
-Run with no arguments:
+Full handoffs start with a `Continuation Snapshot` before the chronological transcript. That front-loads the latest user requests, assistant results, commands, paths, and blockers without internal tool trace details, so a new session can recover current state even if a reader or tool only shows the beginning of the file.
 
-```bash
-codex-lifeboat
-```
-
-The menu gives you:
-
-```text
-[D] Dump full handoff       [S] Compact summary
-[A] Archive session         [P] Purge session with handoff
-[L] Largest sessions        [F] Find sessions
-[H] Doctor report           [N] Pins
-[C] Configure               [Q] Quit
-```
-
-When selecting a session, you can enter a table number, a session id, an id fragment, or `/search text`.
-
-Keyboard controls:
-
-- Menu letters act immediately. Press `D`, `S`, `A`, `P`, `L`, `F`, `H`, `N`, `C`, or `Q`; Enter is not required.
-- Session pickers with 9 or fewer choices accept `1` through `9` immediately.
-- Larger pickers still use Enter so two-digit selections and ID fragments are possible.
-- Menu screens redraw after actions, keeping completed prompts and reports from cluttering the next choice.
-- `q`, `quit`, `exit`, `Esc`, and `Ctrl-C` cancel interactive prompts.
-
-## Recovery Commands
-
-Dump a full handoff:
-
-```bash
-codex-lifeboat SESSION_ID
-```
-
-Create a compact restart summary:
-
-```bash
-codex-lifeboat --summary SESSION_ID
-```
-
-Include truncated tool output in a full handoff:
-
-```bash
-codex-lifeboat SESSION_ID --include-tools
-```
-
-Split large Markdown output:
-
-```bash
-codex-lifeboat SESSION_ID --split-chars 200000
-```
-
-Scan a generated file for likely secrets:
-
-```bash
-codex-lifeboat --scan-secrets ~/codex-lifeboat-dumps/SESSION_ID-handoff.md
-```
-
-Secret redaction is best-effort. Review files before sharing them.
-
-## Find Sessions
-
-List recent sessions:
-
-```bash
-codex-lifeboat --list 20
-```
-
-Show largest sessions:
-
-```bash
-codex-lifeboat --largest 15
-```
-
-Search metadata:
-
-```bash
-codex-lifeboat --search "timeout"
-```
-
-Search rollout contents too:
-
-```bash
-codex-lifeboat --search "important phrase" --scan-content
-```
-
-## Doctor Report
-
-Generate a local health report:
-
-```bash
-codex-lifeboat --doctor
-```
-
-Write it to a file:
-
-```bash
-codex-lifeboat --doctor -o ~/codex-lifeboat-dumps/doctor.md
-```
-
-The report highlights storage size, huge sessions, impossible token counters, missing rollout paths, orphan rollout files, and pinned sessions. Risky sessions include a `Reason` column showing which threshold matched.
-
-## Pins
-
-Pin a session so bulk purge skips it:
-
-```bash
-codex-lifeboat --pin SESSION_ID
-```
-
-Remove a pin:
-
-```bash
-codex-lifeboat --unpin SESSION_ID
-```
-
-List pins:
-
-```bash
-codex-lifeboat --list-pins
-```
-
-## Archive And Purge
-
-Archive a session without purging:
-
-```bash
-codex-lifeboat --archive SESSION_ID
-```
-
-Dry-run a purge:
-
-```bash
-codex-lifeboat --purge --dry-run SESSION_ID
-```
-
-Purge a session:
-
-```bash
-codex-lifeboat --purge SESSION_ID
-```
-
-By default, purge writes a full handoff first. To skip that:
-
-```bash
-codex-lifeboat --purge --no-dump-before-purge SESSION_ID
-```
-
-Archive and purge:
-
-```bash
-codex-lifeboat --purge --archive SESSION_ID
-```
-
-Bulk purge every unpinned session:
-
-```bash
-codex-lifeboat --purge-all-unpinned --dry-run
-codex-lifeboat --purge-all-unpinned
-```
-
-Bulk purge also writes handoffs by default. Use `--no-dump-before-purge` only when you are certain you do not need recovery files.
-
-Purge removes the rollout JSONL file, matching rows from the Codex thread index, related dynamic tool/spawn-edge rows, matching log rows, and then vacuums the SQLite databases.
+Secret redaction is best-effort. Review generated files before sharing them.
 
 ## Development
 
 Run checks:
 
 ```bash
-python3 -m py_compile codex_lifeboat.py
+python3 -m compileall codex_lifeboat
 ```
 
 Run from the repo:
 
 ```bash
-./codex_lifeboat.py --doctor
+python3 -m codex_lifeboat.tui
 ```
 
 ## License

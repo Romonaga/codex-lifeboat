@@ -3,17 +3,22 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "codex-lifeboat"
-version = "0.2.0"
-description = "Recover, summarize, archive, and purge oversized Codex CLI sessions."
+name = "agent-lifeboat"
+version = "0.3.0"
+description = "Recover, summarize, archive, and purge oversized AI coding-agent sessions."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+dependencies = [
+  "textual>=0.80"
+]
 authors = [
   { name = "Robert Winslow" }
 ]
 keywords = [
   "codex",
+  "claude",
+  "ai-agent",
   "openai",
   "cli",
   "session",
@@ -33,7 +38,7 @@ classifiers = [
 ]
 
 [project.scripts]
-codex-lifeboat = "codex_lifeboat:main"
+agent-lifeboat = "codex_lifeboat.tui:main"
 
 [tool.setuptools]
-py-modules = ["codex_lifeboat"]
+packages = ["codex_lifeboat"]

@@ -1,8 +1,8 @@
 __pycache__/
 *.py[cod]
+.venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 codex-lifeboat-dumps/
 *.egg-info/
-
