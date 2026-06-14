@@ -89,7 +89,7 @@ def session_details_markdown(detail: SessionDetail, *, store_display_name: str) 
 
 ## Actions
 
-- Double-click a session row to open the action menu.
+- Click a session row or press Enter to open the action menu.
 - Click a session table header to sort by that column; click it again to reverse direction.
 - `h` write full handoff
 - `H` select visible sessions to combine into one handoff; same-project sessions start checked

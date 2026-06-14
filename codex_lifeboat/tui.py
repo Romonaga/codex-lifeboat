@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import time
-
-from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
@@ -92,7 +89,7 @@ DEFAULT_DESCENDING_SORTS = {"artifacts", "ready", "size", "updated"}
 
 
 class SessionContextMenu(ModalScreen[str | None]):
-    """Right-click action menu for the selected session."""
+    """Action menu for the selected session."""
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
@@ -666,7 +663,6 @@ class LifeboatTui(App[None]):
         self.inject_source_context: RecoveryContext | None = None
         self.sort_column: str | None = None
         self.sort_descending = False
-        self.last_table_click: tuple[float, int | None] = (0.0, None)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -719,7 +715,7 @@ class LifeboatTui(App[None]):
         self.refresh_rows()
         self.table.focus()
         self.set_status(
-            f"Ready on {self.controller.store.display_name}. Use arrows to move, double-click for actions, / to search."
+            f"Ready on {self.controller.store.display_name}. Use arrows to move, click or press Enter for actions, / to search."
         )
 
     @property
@@ -762,45 +758,10 @@ class LifeboatTui(App[None]):
         )
         self.search.tooltip = "Filter by text, or use agent:, project:, cwd:, model:, status:, file:, and artifact: prefixes."
         self.table.tooltip = (
-            "Use arrow keys to select a session. Click column headers to sort. Double-click a row for actions. Press v to toggle an ID-first table view."
+            "Use arrow keys to select a session. Click column headers to sort. Click a row or press Enter for actions. Press v to toggle an ID-first table view."
         )
         self.details.tooltip = "Selected session details, artifact history, transcript preview, readiness reasons, and available actions."
         self.status.tooltip = "Last action result or warning. Injection and purge write backups or recovery context first."
-
-    def on_mouse_down(self, event: events.MouseDown) -> None:
-        if event.button != 1 or event.widget is not self.table:
-            return
-        table = self.table
-        hover_row = table.hover_row
-        now = time.monotonic()
-        last_time, last_row = self.last_table_click
-        self.last_table_click = (now, hover_row)
-        if hover_row is None or hover_row != last_row or now - last_time > 0.45:
-            return
-        event.prevent_default()
-        event.stop()
-        if self.select_hovered_table_row():
-            self.open_context_menu()
-
-    def select_hovered_table_row(self) -> bool:
-        table = self.table
-        hover_row = table.hover_row
-        if hover_row is None or not table.is_valid_row_index(hover_row):
-            return False
-        try:
-            values = table.get_row_at(hover_row)
-        except Exception:
-            return False
-        if not values:
-            return False
-        session_id = str(values[1] if self.show_session_ids and len(values) > 1 else values[-1])
-        if not session_id:
-            return False
-        self.selected_session_id = session_id
-        self.pending_purge = None
-        self.pending_restore = None
-        self.render_details()
-        return True
 
     def open_context_menu(self) -> None:
         row = self.current_row()
@@ -1004,7 +965,7 @@ class LifeboatTui(App[None]):
         self.pending_purge = None
         self.pending_restore = None
         self.render_details()
-        self.set_status(self.selected_status_message())
+        self.open_context_menu()
 
     def on_input_changed(self, _event: Input.Changed) -> None:
         self.pending_purge = None
