@@ -89,6 +89,7 @@ def session_details_markdown(detail: SessionDetail, *, store_display_name: str) 
 
 ## Actions
 
+- Right-click the session table to open the action menu.
 - `h` write full handoff
 - `s` write compact summary
 - `a` archive session file

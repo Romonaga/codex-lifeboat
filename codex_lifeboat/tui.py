@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable, Footer, Header, Input, Markdown, Select, Static
+from textual.containers import Container, Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import DataTable, Header, Input, Label, ListItem, ListView, Markdown, Select, Static
 
 from codex_lifeboat.controller import LifeboatController
 from codex_lifeboat.doctor import report as doctor_report
@@ -21,6 +23,56 @@ from codex_lifeboat.views import (
     restore_preview_markdown,
     session_details_markdown,
 )
+
+
+CONTEXT_ACTIONS = [
+    ("launch_resume", "Open/resume in terminal", "o"),
+    ("copy_session_id", "Copy session ID", "y"),
+    ("handoff", "Write full handoff", "h"),
+    ("summary", "Write compact summary", "s"),
+    ("archive", "Archive session file", "a"),
+    ("export_resume", "Export resume package", "e"),
+    ("inject_handoff", "Inject handoff", "i"),
+    ("compare", "Compare sessions", "c"),
+    ("toggle_pin", "Toggle pin", "p"),
+    ("restore_preview", "Preview backup restore", "u"),
+    ("purge_preview", "Dry-run purge", "x"),
+    ("doctor", "Doctor report", "d"),
+    ("bulk_cleanup", "Bulk cleanup plan", "b"),
+    ("toggle_id_view", "Toggle ID view", "v"),
+    ("refresh", "Refresh sessions", "r"),
+]
+
+
+class SessionContextMenu(ModalScreen[str | None]):
+    """Right-click action menu for the selected session."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("q", "close", "Close"),
+    ]
+
+    def __init__(self, session_id: str | None) -> None:
+        super().__init__()
+        self.session_id = session_id
+
+    def compose(self) -> ComposeResult:
+        title = f"Session Actions: {self.session_id}" if self.session_id else "Session Actions"
+        with Container(id="context-menu"):
+            yield Static(title, id="context-menu-title")
+            yield ListView(
+                *[
+                    ListItem(Label(f"{label}  [{key}]"), id=action)
+                    for action, label, key in CONTEXT_ACTIONS
+                ],
+                id="context-actions",
+            )
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        self.dismiss(event.item.id)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
 
 
 class LifeboatTui(App[None]):
@@ -78,6 +130,28 @@ class LifeboatTui(App[None]):
         height: 3;
         border: round #3f8cff;
         padding: 0 1;
+    }
+
+    SessionContextMenu {
+        align: center middle;
+    }
+
+    #context-menu {
+        width: 52;
+        max-height: 22;
+        border: round #3f8cff;
+        background: #161c22;
+        padding: 1;
+    }
+
+    #context-menu-title {
+        text-style: bold;
+        color: #7cc7ff;
+        margin-bottom: 1;
+    }
+
+    #context-actions {
+        height: 1fr;
     }
 
     .title {
@@ -160,7 +234,6 @@ class LifeboatTui(App[None]):
                 yield Static("Session Details", classes="title")
                 yield Markdown("", id="details")
         yield Static("", id="status")
-        yield Footer()
 
     def on_mount(self) -> None:
         self.title = "Agent Lifeboat"
@@ -168,7 +241,7 @@ class LifeboatTui(App[None]):
         self.refresh_rows()
         self.table.focus()
         self.set_status(
-            f"Ready on {self.controller.store.display_name}. Use arrows to move, / to search, h for handoff, s for summary, d for doctor."
+            f"Ready on {self.controller.store.display_name}. Use arrows to move, right-click for actions, / to search."
         )
 
     @property
@@ -211,10 +284,69 @@ class LifeboatTui(App[None]):
         )
         self.search.tooltip = "Filter by text, or use agent:, project:, cwd:, model:, status:, file:, and artifact: prefixes."
         self.table.tooltip = (
-            "Use arrow keys to select a session. Press v to toggle an ID-first table view."
+            "Use arrow keys to select a session. Right-click for actions. Press v to toggle an ID-first table view."
         )
         self.details.tooltip = "Selected session details, artifact history, transcript preview, readiness reasons, and available actions."
         self.status.tooltip = "Last action result or warning. Injection and purge write backups or recovery context first."
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.button != 3:
+            return
+        event.prevent_default()
+        event.stop()
+        self.select_hovered_table_row()
+        self.open_context_menu()
+
+    def select_hovered_table_row(self) -> None:
+        table = self.table
+        hover_row = table.hover_row
+        if hover_row is None or not table.is_valid_row_index(hover_row):
+            return
+        try:
+            values = table.get_row_at(hover_row)
+        except Exception:
+            return
+        if not values:
+            return
+        session_id = str(values[1] if self.show_session_ids and len(values) > 1 else values[-1])
+        if not session_id:
+            return
+        self.selected_session_id = session_id
+        self.pending_purge = None
+        self.pending_restore = None
+        self.render_details()
+
+    def open_context_menu(self) -> None:
+        if not self.current_row():
+            self.set_status("No session selected.")
+            return
+        self.push_screen(SessionContextMenu(self.selected_session_id), self.handle_context_action)
+
+    def handle_context_action(self, action: str | None) -> None:
+        if not action:
+            self.table.focus()
+            return
+        handlers = {
+            "launch_resume": self.action_launch_resume,
+            "copy_session_id": self.action_copy_session_id,
+            "handoff": self.action_handoff,
+            "summary": self.action_summary,
+            "archive": self.action_archive,
+            "export_resume": self.action_export_resume,
+            "inject_handoff": self.action_inject_handoff,
+            "compare": self.action_compare,
+            "toggle_pin": self.action_toggle_pin,
+            "restore_preview": self.action_restore_preview,
+            "purge_preview": self.action_purge_preview,
+            "doctor": self.action_doctor,
+            "bulk_cleanup": self.action_bulk_cleanup,
+            "toggle_id_view": self.action_toggle_id_view,
+            "refresh": self.action_refresh,
+        }
+        handler = handlers.get(action)
+        if handler:
+            handler()
+        self.table.focus()
 
     def selected_value(self, widget: Select, fallback: str) -> str:
         return fallback if widget.value is Select.BLANK else str(widget.value)
