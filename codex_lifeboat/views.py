@@ -19,19 +19,23 @@ def session_details_markdown(detail: SessionDetail, *, store_display_name: str) 
     sid = str(row.get("id") or "")
     artifacts = detail.state["artifacts"]
     readiness = detail.state["readiness"]
+    health = detail.health
     preview = detail.preview
     tokens = int(row.get("tokens_used") or 0)
     pinned = "yes" if detail.pinned else "no"
+    note = detail.note.text if detail.note else ""
     return f"""# {row.get("title") or row.get("preview") or "Untitled"}
 
 - **Agent:** `{store_display_name}`
 - **Session:** `{sid}`
 - **Pinned:** `{pinned}`
 - **Readiness:** `{readiness.label}`
+- **Health:** `{health.label}` `{health.score}/100`
 - **Project:** `{project_key(row)}`
 - **Session file status:** `{detail.file_status}`
 - **Artifacts:** `{artifacts.label()}`
 - **Size:** `{human_size(detail.state["size"])}`
+- **Backups:** `{detail.backup_count}`
 - **Updated:** `{iso_from_epoch(row.get("updated_at"))}`
 - **CWD:** `{row.get("cwd") or ""}`
 - **Model:** `{row.get("model") or ""}`
@@ -44,6 +48,18 @@ def session_details_markdown(detail: SessionDetail, *, store_display_name: str) 
 - Indexed metadata: `title`, `preview`, `cwd`, timestamps, token counter, session id, and last known session file path.
 - Transcript and tool output: `{detail.transcript_state}`.
 - Actions: {detail.action_state}
+
+## Note
+
+{note or "No local note."}
+
+## Health
+
+{bullets(health.reasons)}
+
+## Health Next Actions
+
+{bullets(health.next_actions)}
 
 ## Readiness
 
@@ -93,6 +109,7 @@ def session_details_markdown(detail: SessionDetail, *, store_display_name: str) 
 - Click a session table header to sort by that column; click it again to reverse direction.
 - `h` write full handoff
 - `H` select visible sessions to combine into one handoff; same-project sessions start checked
+- `m` make this session safe by writing handoff, summary, and archive
 - `s` write compact summary
 - `a` archive session file
 - `e` export resume package
@@ -100,6 +117,13 @@ def session_details_markdown(detail: SessionDetail, *, store_display_name: str) 
 - `o` open a terminal in the session cwd and resume the selected agent session
 - `i` open source/target injection picker, optionally combine same-project sources, then inject after backup
 - `c` compare selected sessions
+- `g` show health details
+- `t` show project timeline
+- `j` show project dashboard
+- `n` edit local session note
+- `k` browse backups and restore a selected backup
+- `w` show recovery wizard
+- `f` run safe doctor fixes
 - `b` show bulk cleanup plan for visible sessions
 - `v` toggle ID-first table view
 - `Esc` cancel pending injection, compare, purge confirmation, or clear search
@@ -120,12 +144,16 @@ def preview_scan_label(preview: Any) -> str:
     return "not available"
 
 
-def compare_markdown(left: dict[str, Any], right: dict[str, Any], *, left_state: Any, right_state: Any) -> str:
+def compare_markdown(left: dict[str, Any], right: dict[str, Any], *, left_state: Any, right_state: Any, left_health: Any = None, right_health: Any = None, left_preview: Any = None, right_preview: Any = None) -> str:
     def line(label: str, key: str) -> str:
         return f"| {label} | `{left.get(key) or ''}` | `{right.get(key) or ''}` |"
 
     left_id = str(left.get("id") or "")
     right_id = str(right.get("id") or "")
+    left_score = f"{left_health.label} {left_health.score}/100" if left_health else ""
+    right_score = f"{right_health.label} {right_health.score}/100" if right_health else ""
+    left_counts = transcript_counts(left_preview)
+    right_counts = transcript_counts(right_preview)
     return "\n".join(
         [
             "# Session Compare",
@@ -134,8 +162,10 @@ def compare_markdown(left: dict[str, Any], right: dict[str, Any], *, left_state:
             "| --- | --- | --- |",
             f"| Session | `{left_id}` | `{right_id}` |",
             f"| Readiness | `{left_state.readiness.label}` | `{right_state.readiness.label}` |",
+            f"| Health | `{left_score}` | `{right_score}` |",
             f"| Artifacts | `{left_state.artifacts.label()}` | `{right_state.artifacts.label()}` |",
             f"| Size | `{human_size(left_state.size)}` | `{human_size(right_state.size)}` |",
+            f"| Transcript counts | `{left_counts}` | `{right_counts}` |",
             f"| Project | `{project_key(left)}` | `{project_key(right)}` |",
             line("Updated", "updated_at"),
             line("CWD", "cwd"),
@@ -144,6 +174,126 @@ def compare_markdown(left: dict[str, Any], right: dict[str, Any], *, left_state:
             line("Session file", "rollout_path"),
         ]
     )
+
+
+def transcript_counts(preview: Any) -> str:
+    if not preview:
+        return ""
+    return f"{preview.message_count} msg, {preview.tool_call_count} calls, {preview.tool_output_count} outputs"
+
+
+def health_markdown(detail: SessionDetail) -> str:
+    health = detail.health
+    return (
+        "# Session Health\n\n"
+        f"- Label: `{health.label}`\n"
+        f"- Score: `{health.score}/100`\n"
+        f"- Session: `{detail.row.get('id') or ''}`\n"
+        f"- Readiness: `{detail.state['readiness'].label}`\n"
+        f"- Artifacts: `{detail.state['artifacts'].label()}`\n"
+        f"- Backups: `{detail.backup_count}`\n\n"
+        "## Reasons\n\n"
+        f"{bullets(health.reasons)}\n\n"
+        "## Next Actions\n\n"
+        f"{bullets(health.next_actions)}"
+    )
+
+
+def project_dashboard_markdown(summaries: list[Any]) -> str:
+    if not summaries:
+        return "# Project Dashboard\n\nNo visible projects."
+    lines = [
+        "# Project Dashboard",
+        "",
+        "| Project | Sessions | Health | Missing Handoff | Archived | Pinned | Notes | Size | Latest | Best Session |",
+        "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+    ]
+    for summary in summaries[:80]:
+        health = f"Rd{summary.ready} Rc{summary.recoverable} Rs{summary.risky} Bk{summary.broken}"
+        latest = iso_from_epoch(summary.latest_updated_at)[:19]
+        best = f"`{summary.best_session_id}`"
+        if summary.best_title:
+            best += f" {summary.best_title[:42]}"
+        lines.append(
+            f"| {summary.label} | {summary.sessions} | `{health}` | {summary.missing_handoffs} | "
+            f"{summary.archived} | {summary.pinned} | {summary.noted} | {human_size(summary.total_size)} | "
+            f"`{latest}` | {best} |"
+        )
+    lines.append("")
+    lines.append("Health codes: `Rd` Ready, `Rc` Recoverable, `Rs` Risky, `Bk` Broken.")
+    return "\n".join(lines)
+
+
+def project_timeline_markdown(project: str, entries: list[Any]) -> str:
+    if not entries:
+        return f"# Project Timeline\n\nNo visible sessions for `{project}`."
+    lines = [
+        "# Project Timeline",
+        "",
+        f"Project: `{project}`",
+        "",
+        "| Updated | Health | Ready | Artifacts | Size | Session | Note | Title |",
+        "| --- | --- | --- | --- | ---: | --- | --- | --- |",
+    ]
+    for entry in entries[-120:]:
+        note = "yes" if entry.note else ""
+        title = entry.title.replace("|", "\\|")[:70]
+        lines.append(
+            f"| `{iso_from_epoch(entry.updated_at)[:19]}` | `{entry.health} {entry.health_score}` | "
+            f"`{entry.readiness}` | `{entry.artifacts}` | {human_size(entry.size)} | "
+            f"`{entry.session_id}` | {note} | {title} |"
+        )
+    return "\n".join(lines)
+
+
+def safe_bundle_markdown(result: Any) -> str:
+    return (
+        "# Make Safe Complete\n\n"
+        f"- Handoff: `{result.handoff.path}`\n"
+        f"- Summary: `{result.summary.path}`\n"
+        f"- Archive: `{result.archive_path}`\n\n"
+        "The selected session now has the core recovery artifacts."
+    )
+
+
+def session_note_markdown(session_id: str, note: Any) -> str:
+    if not note:
+        return f"# Session Note\n\nNo note saved for `{session_id}`."
+    return (
+        "# Session Note\n\n"
+        f"- Session: `{session_id}`\n"
+        f"- Updated: `{note.updated_at}`\n\n"
+        f"{note.text}"
+    )
+
+
+def recovery_wizard_markdown(detail: SessionDetail) -> str:
+    health = detail.health
+    readiness = detail.state["readiness"]
+    artifacts = detail.state["artifacts"]
+    lines = [
+        "# Recovery Wizard",
+        "",
+        f"- Session: `{detail.row.get('id') or ''}`",
+        f"- Health: `{health.label}` `{health.score}/100`",
+        f"- Readiness: `{readiness.label}`",
+        f"- Artifacts: `{artifacts.label()}`",
+        "",
+        "## Recommended Flow",
+        "",
+    ]
+    if health.label == "Broken":
+        lines.extend(["1. Open Backup Browser (`k`) and restore a backup if one exists.", "2. If no backup exists, use indexed metadata/details only."])
+    elif not artifacts.has_handoff or not artifacts.has_archive:
+        lines.extend(["1. Run Make Safe (`m`) to write handoff, summary, and archive.", "2. Add a session note (`n`) if this is an important branch.", "3. Resume directly (`o`) or export a package (`e`)."])
+    else:
+        lines.extend(["1. Add or review the session note (`n`).", "2. Resume directly (`o`), export (`e`), inject (`i`), or purge only when intended."])
+    lines.extend(["", "## Health Actions", "", bullets(health.next_actions)])
+    return "\n".join(lines)
+
+
+def doctor_fixes_markdown(lines: list[str]) -> str:
+    return "# Doctor Fixes\n\n" + "\n".join(f"- {line}" for line in lines)
 
 
 def bulk_cleanup_markdown(lines: list[str]) -> str:

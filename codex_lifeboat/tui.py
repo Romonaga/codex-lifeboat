@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
@@ -16,11 +19,18 @@ from codex_lifeboat.text import human_size
 from codex_lifeboat.views import (
     bulk_cleanup_markdown,
     compare_markdown,
+    doctor_fixes_markdown,
+    health_markdown,
     injection_markdown,
+    project_dashboard_markdown,
+    project_timeline_markdown,
     purge_complete_markdown,
     purge_preview_markdown,
+    recovery_wizard_markdown,
     restore_complete_markdown,
     restore_preview_markdown,
+    safe_bundle_markdown,
+    session_note_markdown,
     session_details_markdown,
 )
 
@@ -36,18 +46,21 @@ CONTEXT_SECTIONS = [
     (
         "Recover",
         [
+            ("make_safe", "Make safe", "m"),
             ("handoff", "Write full handoff", "h"),
             ("project_handoff", "Write combined handoff", "H"),
             ("summary", "Write compact summary", "s"),
             ("export_resume", "Export resume package", "e"),
             ("inject_handoff", "Inject handoff", "i"),
-            ("compare", "Compare sessions", "c"),
+            ("recovery_wizard", "Recovery wizard", "w"),
         ],
     ),
     (
         "Manage",
         [
+            ("session_note", "Edit note", "n"),
             ("toggle_pin", "Toggle pin", "p"),
+            ("backup_browser", "Browse backups", "k"),
             ("archive", "Archive session file", "a"),
             ("restore_preview", "Preview backup restore", "u"),
             ("purge_preview", "Dry-run purge", "x"),
@@ -56,7 +69,12 @@ CONTEXT_SECTIONS = [
     (
         "Inspect",
         [
+            ("health", "Health details", "g"),
+            ("project_timeline", "Project timeline", "t"),
+            ("project_dashboard", "Project dashboard", "j"),
+            ("compare", "Compare sessions", "c"),
             ("doctor", "Doctor report", "d"),
+            ("doctor_fixes", "Doctor fixes", "f"),
             ("bulk_cleanup", "Bulk cleanup plan", "b"),
         ],
     ),
@@ -399,6 +417,126 @@ class InjectionPicker(ModalScreen[tuple[tuple[str, ...], str] | None]):
         self.dismiss(None)
 
 
+class BackupPicker(ModalScreen[str | None]):
+    """Picker for restoring a specific session backup."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("q", "close", "Close"),
+    ]
+
+    def __init__(self, session_id: str, backups: list) -> None:
+        super().__init__()
+        self.session_id = session_id
+        self.backups = backups
+        self.selected_index = 0 if backups else None
+
+    def compose(self) -> ComposeResult:
+        with Container(id="backup-picker"):
+            yield Static(f"Backups for {self.session_id}", id="backup-title")
+            yield ListView(*self.list_items(), id="backup-list")
+            yield Static("", id="backup-status")
+            with Horizontal(id="backup-buttons"):
+                yield Button("Cancel", id="backup-cancel")
+                yield Button("Restore Selected", id="backup-confirm", variant="primary")
+
+    def on_mount(self) -> None:
+        self.refresh_status()
+        self.query_one("#backup-list", ListView).focus()
+
+    def list_items(self) -> list[ListItem]:
+        items: list[ListItem] = []
+        for index, backup in enumerate(self.backups):
+            items.append(ListItem(Label(self.backup_label(index, backup), markup=False), id=f"backup-{index}"))
+        return items
+
+    def backup_label(self, index: int, backup: object) -> str:
+        marker = ">" if index == self.selected_index else " "
+        return f"{marker} {iso_from_epoch(backup.updated_at)[:19]} {human_size(backup.size):>8} {backup.path.name}"
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        item_id = event.item.id or ""
+        _prefix, _separator, index_text = item_id.partition("-")
+        if not index_text.isdigit():
+            return
+        self.selected_index = int(index_text)
+        self.refresh_list_labels()
+        self.refresh_status()
+
+    def refresh_list_labels(self) -> None:
+        for item in self.query_one("#backup-list", ListView).children:
+            item_id = item.id or ""
+            _prefix, _separator, index_text = item_id.partition("-")
+            if not index_text.isdigit():
+                continue
+            index = int(index_text)
+            if 0 <= index < len(self.backups):
+                item.query_one(Label).update(self.backup_label(index, self.backups[index]))
+
+    def refresh_status(self) -> None:
+        if not self.backups:
+            self.query_one("#backup-status", Static).update("No backups available.")
+            return
+        selected = self.backups[self.selected_index or 0]
+        self.query_one("#backup-status", Static).update(f"Selected backup: {selected.path}")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "backup-cancel":
+            self.dismiss(None)
+            return
+        if event.button.id == "backup-confirm":
+            if self.selected_index is None:
+                self.dismiss(None)
+                return
+            self.dismiss(str(self.backups[self.selected_index].path))
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class NoteEditor(ModalScreen[tuple[str, str] | None]):
+    """Single-line local note editor for the selected session."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+    ]
+
+    def __init__(self, session_id: str, current_text: str) -> None:
+        super().__init__()
+        self.session_id = session_id
+        self.current_text = current_text
+
+    def compose(self) -> ComposeResult:
+        with Container(id="note-editor"):
+            yield Static(f"Note for {self.session_id}", id="note-title")
+            yield Input(value=self.current_text, placeholder="Why this session matters", id="note-input")
+            yield Static("Keep it short: good branch, bad attempt, resume target, etc.", id="note-help")
+            with Horizontal(id="note-buttons"):
+                yield Button("Cancel", id="note-cancel")
+                yield Button("Clear", id="note-clear")
+                yield Button("Save", id="note-save", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#note-input", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "note-cancel":
+            self.dismiss(None)
+            return
+        if event.button.id == "note-clear":
+            self.dismiss(("clear", ""))
+            return
+        if event.button.id == "note-save":
+            text = self.query_one("#note-input", Input).value
+            self.dismiss(("save", text))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(("save", event.value))
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class LifeboatTui(App[None]):
     """Terminal app for browsing and recovering AI agent sessions."""
 
@@ -485,6 +623,14 @@ class LifeboatTui(App[None]):
     }
 
     CombinedHandoffPicker {
+        align: center middle;
+    }
+
+    BackupPicker {
+        align: center middle;
+    }
+
+    NoteEditor {
         align: center middle;
     }
 
@@ -619,6 +765,60 @@ class LifeboatTui(App[None]):
         margin-left: 1;
     }
 
+    #backup-picker {
+        width: 86%;
+        height: 70%;
+        border: round #3f8cff;
+        background: #161c22;
+        padding: 1;
+    }
+
+    #backup-title,
+    #note-title {
+        height: 1;
+        text-style: bold;
+        color: #7cc7ff;
+        margin-bottom: 1;
+    }
+
+    #backup-list {
+        height: 1fr;
+        border: round #58616d;
+    }
+
+    #backup-status,
+    #note-help {
+        height: 3;
+        color: #e8edf2;
+        padding: 0 1;
+    }
+
+    #backup-buttons,
+    #note-buttons {
+        height: 3;
+        align-horizontal: right;
+    }
+
+    #backup-cancel,
+    #backup-confirm,
+    #note-cancel,
+    #note-clear,
+    #note-save {
+        margin-left: 1;
+    }
+
+    #note-editor {
+        width: 78%;
+        height: 14;
+        border: round #3f8cff;
+        background: #161c22;
+        padding: 1;
+    }
+
+    #note-input {
+        height: 3;
+    }
+
     .title {
         width: auto;
         text-style: bold;
@@ -633,6 +833,7 @@ class LifeboatTui(App[None]):
         Binding("v", "toggle_id_view", "ID view"),
         Binding("/", "focus_search", "Search"),
         Binding("escape", "clear_search", "Clear"),
+        Binding("m", "make_safe", "Make safe"),
         Binding("h", "handoff", "Handoff"),
         Binding("H", "project_handoff", "Combined handoff"),
         Binding("s", "summary", "Summary"),
@@ -641,10 +842,17 @@ class LifeboatTui(App[None]):
         Binding("y", "copy_session_id", "Copy ID"),
         Binding("o", "launch_resume", "Open"),
         Binding("i", "inject_handoff", "Inject"),
+        Binding("w", "recovery_wizard", "Wizard"),
         Binding("c", "compare", "Compare"),
+        Binding("g", "health", "Health"),
+        Binding("t", "project_timeline", "Timeline"),
+        Binding("j", "project_dashboard", "Projects"),
+        Binding("n", "session_note", "Note"),
+        Binding("k", "backup_browser", "Backups"),
         Binding("b", "bulk_cleanup", "Bulk plan"),
         Binding("p", "toggle_pin", "Pin"),
         Binding("d", "doctor", "Doctor"),
+        Binding("f", "doctor_fixes", "Fix"),
         Binding("x", "purge_preview", "Dry purge"),
         Binding("ctrl+x", "purge_confirm", "Purge"),
         Binding("u", "restore_preview", "Restore"),
@@ -679,7 +887,7 @@ class LifeboatTui(App[None]):
                         compact=True,
                     )
                     yield Select(
-                        [("Recent", "recent"), ("Project", "project"), ("Readiness", "readiness")],
+                        [("Recent", "recent"), ("Project", "project"), ("Readiness", "readiness"), ("Pinned", "pinned")],
                         value="recent",
                         allow_blank=False,
                         id="group",
@@ -749,7 +957,7 @@ class LifeboatTui(App[None]):
     def install_tooltips(self) -> None:
         self.query_one("#agent").tooltip = "Choose which local agent session store to browse: Codex or Claude Code."
         self.query_one("#group").tooltip = (
-            "Recent shows newest sessions first. Project groups sessions by cwd/repo. "
+            "Recent shows newest sessions first. Project groups sessions by cwd/repo. Pinned shows only pinned sessions. "
             "Readiness sorts by recovery state such as Ready, Partial, Needs handoff, or Missing."
         )
         self.query_one("#target").tooltip = "Choose the agent you plan to resume in. Cross-agent handoffs add target-specific restart notes."
@@ -770,6 +978,11 @@ class LifeboatTui(App[None]):
             return
         self.push_screen(SessionContextMenu(row), self.handle_context_action)
 
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.widget is self.table and event.button != 1:
+            event.prevent_default()
+            event.stop()
+
     def handle_context_action(self, action: str | None) -> None:
         if not action:
             self.table.focus()
@@ -777,17 +990,25 @@ class LifeboatTui(App[None]):
         handlers = {
             "launch_resume": self.action_launch_resume,
             "copy_session_id": self.action_copy_session_id,
+            "make_safe": self.action_make_safe,
             "handoff": self.action_handoff,
             "project_handoff": self.action_project_handoff,
             "summary": self.action_summary,
             "archive": self.action_archive,
             "export_resume": self.action_export_resume,
             "inject_handoff": self.action_inject_handoff,
+            "recovery_wizard": self.action_recovery_wizard,
             "compare": self.action_compare,
+            "health": self.action_health,
+            "project_timeline": self.action_project_timeline,
+            "project_dashboard": self.action_project_dashboard,
+            "session_note": self.action_session_note,
+            "backup_browser": self.action_backup_browser,
             "toggle_pin": self.action_toggle_pin,
             "restore_preview": self.action_restore_preview,
             "purge_preview": self.action_purge_preview,
             "doctor": self.action_doctor,
+            "doctor_fixes": self.action_doctor_fixes,
             "bulk_cleanup": self.action_bulk_cleanup,
             "toggle_id_view": self.action_toggle_id_view,
             "refresh": self.action_refresh,
@@ -809,7 +1030,7 @@ class LifeboatTui(App[None]):
                 f"Injection source {self.inject_source_context.session_id} armed. "
                 f"Select target {self.selected_session_id or ''} and press i, or return to source and press i to clear."
             )
-        return f"Selected {self.selected_session_id}. Press v to toggle ID view."
+        return f"Selected {self.selected_session_id}. Press Enter for actions or v to toggle ID view."
 
     def refresh_rows(self) -> None:
         self.rows = self.controller.refresh(
@@ -1019,6 +1240,39 @@ class LifeboatTui(App[None]):
         self.details.update(doctor_report(self.controller.config, self.controller.store, self.controller.pins, agent_key=self.controller.agent_key))
         self.set_status("Doctor report loaded.")
 
+    def action_doctor_fixes(self) -> None:
+        lines = self.controller.doctor_fix_lines()
+        self.details.update(doctor_fixes_markdown(lines))
+        self.set_status("Safe doctor fixes applied.")
+
+    def action_health(self) -> None:
+        row = self.current_row()
+        if not row:
+            return
+        detail = self.controller.detail_for(row)
+        self.details.update(health_markdown(detail))
+        self.set_status(f"Health loaded: {detail.health.label} {detail.health.score}/100.")
+
+    def action_project_dashboard(self) -> None:
+        summaries = self.controller.project_dashboard(self.rows[:500])
+        self.details.update(project_dashboard_markdown(summaries))
+        self.set_status(f"Project dashboard loaded for {len(summaries)} visible projects.")
+
+    def action_project_timeline(self) -> None:
+        row = self.current_row()
+        if not row:
+            return
+        entries = self.controller.project_timeline(row, self.rows[:500])
+        self.details.update(project_timeline_markdown(project_key(row), entries))
+        self.set_status(f"Project timeline loaded with {len(entries)} visible sessions.")
+
+    def action_recovery_wizard(self) -> None:
+        row = self.current_row()
+        if not row:
+            return
+        self.details.update(recovery_wizard_markdown(self.controller.detail_for(row)))
+        self.set_status("Recovery wizard loaded.")
+
     def action_handoff(self) -> None:
         row = self.current_row()
         if not row:
@@ -1065,6 +1319,18 @@ class LifeboatTui(App[None]):
         self.refresh_rows()
         self.set_status(f"Wrote summary: {result.path}")
 
+    def action_make_safe(self) -> None:
+        row = self.current_row()
+        if not row:
+            return
+        result, error = self.controller.make_safe(row, scrub_profile=self.scrub_profile, target_agent=self.target_agent)
+        if error:
+            self.set_status(error)
+            return
+        self.refresh_rows()
+        self.details.update(safe_bundle_markdown(result))
+        self.set_status(f"Made session safe: {result.handoff.path}")
+
     def action_archive(self) -> None:
         row = self.current_row()
         if not row:
@@ -1098,6 +1364,72 @@ class LifeboatTui(App[None]):
             return
         self.copy_to_clipboard(session_id)
         self.set_status(f"Copied session id to clipboard: {session_id}")
+
+    def action_session_note(self) -> None:
+        row = self.current_row()
+        if not row:
+            self.set_status("No session selected.")
+            return
+        session_id = str(row.get("id") or "")
+        note = self.controller.note_for(row)
+        self.push_screen(NoteEditor(session_id, note.text if note else ""), self.handle_note_result)
+
+    def handle_note_result(self, result: tuple[str, str] | None) -> None:
+        self.table.focus()
+        row = self.current_row()
+        if not row:
+            return
+        session_id = str(row.get("id") or "")
+        if not result:
+            self.set_status("Note edit cancelled.")
+            return
+        mode, text = result
+        if mode == "clear":
+            self.controller.clear_note(row)
+            self.refresh_rows()
+            self.details.update(session_note_markdown(session_id, None))
+            self.set_status(f"Cleared note for {session_id}.")
+            return
+        note = self.controller.set_note(row, text)
+        self.refresh_rows()
+        self.details.update(session_note_markdown(session_id, note))
+        self.set_status(f"Saved note for {session_id}." if note else f"Cleared note for {session_id}.")
+
+    def action_backup_browser(self) -> None:
+        row = self.current_row()
+        if not row:
+            return
+        backups, error = self.controller.backups_for(row)
+        if error:
+            self.set_status(error)
+            return
+        if not backups:
+            context, context_error = self.controller.recovery_context(row)
+            if not context:
+                self.set_status(context_error or "Selected session cannot be restored.")
+                return
+            self.details.update(restore_preview_markdown(context.session_file_path, backups))
+            self.set_status(f"No backups found for {context.session_id}.")
+            return
+        self.push_screen(BackupPicker(str(row.get("id") or ""), backups), self.handle_backup_selection)
+
+    def handle_backup_selection(self, backup_path: str | None) -> None:
+        self.table.focus()
+        row = self.current_row()
+        if not row:
+            return
+        session_id = str(row.get("id") or "")
+        if not backup_path:
+            self.set_status("Backup restore cancelled.")
+            return
+        result, error = self.controller.restore_backup(row, Path(backup_path))
+        if error:
+            self.set_status(error)
+            return
+        self.pending_restore = None
+        self.refresh_rows()
+        self.details.update(restore_complete_markdown(result))
+        self.set_status(f"Restored {session_id} from {result.backup_path}.")
 
     def action_launch_resume(self) -> None:
         row = self.current_row()
@@ -1177,6 +1509,10 @@ class LifeboatTui(App[None]):
                 row,
                 left_state=self.controller.state_for(left),
                 right_state=self.controller.state_for(row),
+                left_health=self.controller.health_for(left),
+                right_health=self.controller.health_for(row),
+                left_preview=self.controller.preview_for(self.controller.store.session_file_path(left)),
+                right_preview=self.controller.preview_for(self.controller.store.session_file_path(row)),
             )
         )
         self.set_status("Compare view loaded.")

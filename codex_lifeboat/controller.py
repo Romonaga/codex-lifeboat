@@ -7,6 +7,7 @@ from typing import Any
 from .agents import AgentChoice, SessionBackend, build_store, default_agent, detect_agents
 from .artifacts import ArtifactHistory, artifact_history
 from .config import AppConfig, load_config
+from .health import SessionHealth, session_health
 from .intelligence import (
     RecoveryReadiness,
     TranscriptPreview,
@@ -17,8 +18,11 @@ from .intelligence import (
     row_matches_filters,
 )
 from .launcher import LaunchResult, launch_resume_terminal
+from .maintenance import doctor_fixes
+from .notes import NotesStore, SessionNote
 from .operations import archive_session, purge_session
 from .pins import PinStore
+from .projects import ProjectSummary, TimelineEntry, summarize_projects, timeline_for_project
 from .recovery import (
     BackupInfo,
     InjectionResult,
@@ -35,6 +39,7 @@ from .recovery import (
     write_combined_agent_handoff,
     write_resume_package,
 )
+from .safety import SafeBundleResult, make_safe_bundle
 
 DETAIL_PREVIEW_BYTES = 2 * 1024 * 1024
 
@@ -49,6 +54,9 @@ class SessionDetail:
     has_session_file: bool
     transcript_state: str
     action_state: str
+    health: SessionHealth
+    note: SessionNote | None
+    backup_count: int
 
 
 class LifeboatController:
@@ -58,6 +66,7 @@ class LifeboatController:
         self.agent_key: str = default_agent(self.config)
         self.store: SessionBackend = build_store(self.config, self.agent_key)
         self.pins = PinStore(self.config)
+        self.notes = NotesStore(self.config)
         self.rows: list[dict[str, Any]] = []
         self.row_states: dict[str, dict[str, Any]] = {}
         self.preview_cache: dict[tuple[str, str, int, int], TranscriptPreview] = {}
@@ -104,6 +113,8 @@ class LifeboatController:
                 "project": project_key(row),
             }
             self.row_states[sid] = state
+            if group_mode == "pinned" and self.pin_key(sid) not in pinned:
+                continue
             if row_matches_filters(
                 row,
                 agent_key=self.agent_key,
@@ -122,6 +133,8 @@ class LifeboatController:
                     -(int(row.get("updated_at") or 0)),
                 )
             )
+        elif group_mode == "pinned":
+            filtered.sort(key=lambda row: row.get("updated_at") or 0, reverse=True)
         else:
             filtered.sort(key=lambda row: row.get("updated_at") or 0, reverse=True)
         self.rows = filtered
@@ -150,6 +163,9 @@ class LifeboatController:
     def detail_for(self, row: dict[str, Any]) -> SessionDetail:
         path = self.store.session_file_path(row)
         has_file = self.store.has_session_file(row)
+        backups = list_session_backups(path) if path and path.is_file() else []
+        note = self.note_for(row)
+        health = self.health_for(row, backup_count=len(backups), note=note)
         transcript_state = "available" if has_file else "not recoverable without the session file"
         action_state = (
             "Full handoff, summary, archive, and purge are available."
@@ -170,6 +186,63 @@ class LifeboatController:
             has_session_file=has_file,
             transcript_state=transcript_state,
             action_state=action_state,
+            health=health,
+            note=note,
+            backup_count=len(backups),
+        )
+
+    def is_pinned(self, row: dict[str, Any]) -> bool:
+        return self.pin_key(str(row.get("id") or "")) in self.pins.load()
+
+    def note_for(self, row: dict[str, Any]) -> SessionNote | None:
+        return self.notes.get(self.agent_key, str(row.get("id") or ""))
+
+    def set_note(self, row: dict[str, Any], text: str) -> SessionNote | None:
+        return self.notes.set(self.agent_key, str(row.get("id") or ""), text)
+
+    def clear_note(self, row: dict[str, Any]) -> None:
+        self.notes.clear(self.agent_key, str(row.get("id") or ""))
+
+    def health_for(
+        self,
+        row: dict[str, Any],
+        *,
+        backup_count: int | None = None,
+        note: SessionNote | None = None,
+    ) -> SessionHealth:
+        state = self.state_for(row)
+        path = self.store.session_file_path(row)
+        if backup_count is None:
+            backup_count = len(list_session_backups(path)) if path and path.is_file() else 0
+        if note is None:
+            note = self.note_for(row)
+        return session_health(
+            row=row,
+            readiness=state.readiness,
+            artifacts=state.artifacts,
+            size=state.size,
+            has_session_file=self.store.has_session_file(row),
+            backup_count=backup_count,
+            pinned=self.is_pinned(row),
+            has_note=bool(note),
+        )
+
+    def project_dashboard(self, rows: list[dict[str, Any]]) -> list[ProjectSummary]:
+        return summarize_projects(
+            rows,
+            state_for=self.state_for,
+            health_for=self.health_for,
+            is_pinned=self.is_pinned,
+            note_for=self.note_for,
+        )
+
+    def project_timeline(self, row: dict[str, Any], rows: list[dict[str, Any]]) -> list[TimelineEntry]:
+        return timeline_for_project(
+            rows,
+            row,
+            state_for=self.state_for,
+            health_for=self.health_for,
+            note_for=self.note_for,
         )
 
     def preview_for(self, path: Path | None) -> TranscriptPreview:
@@ -259,6 +332,12 @@ class LifeboatController:
         if not context:
             return None, error
         return archive_session(context.session_id, context.session_file_path, {"agent": self.agent_key, **context.metadata}, self.config.output_dir / "archives"), None
+
+    def make_safe(self, row: dict[str, Any], *, scrub_profile: str, target_agent: str) -> tuple[SafeBundleResult | None, str | None]:
+        context, error = self.recovery_context(row)
+        if not context:
+            return None, error
+        return make_safe_bundle(self.config, context, scrub_profile=scrub_profile, target_agent=target_agent), None
 
     def export_resume(self, row: dict[str, Any], *, scrub_profile: str, target_agent: str) -> tuple[Path | None, str | None]:
         context, error = self.recovery_context(row)
@@ -424,6 +503,20 @@ class LifeboatController:
             return None, f"Restore failed: {exc}"
         self.preview_cache = {}
         return result, None
+
+    def restore_backup(self, row: dict[str, Any], backup_path: Path) -> tuple[RestoreResult | None, str | None]:
+        context, error = self.recovery_context(row)
+        if not context:
+            return None, error
+        try:
+            result = restore_session_backup(context.session_file_path, backup_path)
+        except OSError as exc:
+            return None, f"Restore failed: {exc}"
+        self.preview_cache = {}
+        return result, None
+
+    def doctor_fix_lines(self) -> list[str]:
+        return doctor_fixes(self.config)
 
 
 @dataclass(frozen=True)
