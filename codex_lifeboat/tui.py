@@ -98,6 +98,7 @@ class LifeboatTui(App[None]):
         Binding("a", "archive", "Archive"),
         Binding("e", "export_resume", "Export"),
         Binding("y", "copy_session_id", "Copy ID"),
+        Binding("o", "launch_resume", "Open"),
         Binding("i", "inject_handoff", "Inject"),
         Binding("c", "compare", "Compare"),
         Binding("b", "bulk_cleanup", "Bulk plan"),
@@ -434,6 +435,20 @@ class LifeboatTui(App[None]):
             return
         self.copy_to_clipboard(session_id)
         self.set_status(f"Copied session id to clipboard: {session_id}")
+
+    def action_launch_resume(self) -> None:
+        row = self.current_row()
+        if not row:
+            self.set_status("No session selected.")
+            return
+        result, error = self.controller.launch_resume(row)
+        if error:
+            self.set_status(error)
+            return
+        message = f"Opened Tilix in {result.cwd} and started: {result.command_text()}"
+        if result.warning:
+            message = f"{message}. {result.warning}"
+        self.set_status(message)
 
     def action_inject_handoff(self) -> None:
         row = self.current_row()

@@ -16,6 +16,7 @@ It currently supports Codex and Claude Code sessions. It helps you browse sessio
 - Full Markdown handoff for pasting into a fresh AI session.
 - Compact recovery summary focused on goals, paths, commands, blockers, and recent context.
 - Resume package export with handoff, summary, archive, and metadata.
+- One-key resume launcher that opens Tilix in the session cwd and starts Codex or Claude resume.
 - Target-agent handoff notes for Codex-to-Codex, Codex-to-Claude, Claude-to-Claude, and Claude-to-Codex recovery.
 - Scrub profiles for private, shareable, and public recovery artifacts.
 - Guarded handoff injection that copies one session's compact recovery note into another session file only after creating a backup.
@@ -80,6 +81,7 @@ The code is split by domain:
 - `codex_lifeboat/artifacts.py`: generated handoff, summary, archive, and resume-package history.
 - `codex_lifeboat/handoff.py`: full handoffs, compact summaries, splitting, and secret scanning.
 - `codex_lifeboat/recovery.py`: reusable recovery actions, scrub profiles, target-agent notes, resume export, and injection.
+- `codex_lifeboat/launcher.py`: external terminal and agent resume launching.
 - `codex_lifeboat/doctor.py`: health reports and risk classification.
 - `codex_lifeboat/pins.py`: pinned session storage.
 - `codex_lifeboat/operations.py`: archive and purge operations.
@@ -112,7 +114,7 @@ Run the program:
 agent-lifeboat
 ```
 
-The terminal app provides a bordered session explorer, an agent selector, project/readiness grouping, filtered search, pinned-session state, readiness status, artifact history, full handoff generation, compact summary generation, archive, resume export, guarded injection, guarded purge, and the doctor report.
+The terminal app provides a bordered session explorer, an agent selector, project/readiness grouping, filtered search, pinned-session state, readiness status, artifact history, full handoff generation, compact summary generation, archive, resume export, direct Tilix resume launching, guarded injection, guarded purge, and the doctor report.
 
 Common keys:
 
@@ -122,6 +124,7 @@ s        write compact summary
 a        archive session file
 e        export resume package
 y        copy selected session id to clipboard
+o        open Tilix in the session cwd and resume the selected agent session
 i        set injection source, then inject into a different selected session after backup
 c        compare two sessions
 b        show bulk cleanup plan

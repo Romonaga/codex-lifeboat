@@ -94,6 +94,7 @@ def session_details_markdown(detail: SessionDetail, *, store_display_name: str) 
 - `a` archive session file
 - `e` export resume package
 - `y` copy selected session id to clipboard
+- `o` open Tilix in the session cwd and resume the selected agent session
 - `i` set injection source, then inject it into a different selected session after backup
 - `c` compare selected sessions
 - `b` show bulk cleanup plan for visible sessions

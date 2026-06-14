@@ -16,6 +16,7 @@ from .intelligence import (
     recovery_readiness,
     row_matches_filters,
 )
+from .launcher import LaunchResult, launch_resume_terminal
 from .operations import archive_session, purge_session
 from .pins import PinStore
 from .recovery import (
@@ -215,6 +216,10 @@ class LifeboatController:
         if not context:
             return None, error
         return write_resume_package(self.config, context, scrub_profile=scrub_profile, target_agent=target_agent), None
+
+    def launch_resume(self, row: dict[str, Any]) -> tuple[LaunchResult | None, str | None]:
+        session_id = str(row.get("id") or "")
+        return launch_resume_terminal(self.agent_key, session_id, row.get("cwd"))
 
     def inject(self, row: dict[str, Any], *, scrub_profile: str, target_agent: str) -> tuple[InjectionResult | None, str | None]:
         context, error = self.recovery_context(row)
