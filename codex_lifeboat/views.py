@@ -89,14 +89,16 @@ def session_details_markdown(detail: SessionDetail, *, store_display_name: str) 
 
 ## Actions
 
-- Right-click the session table to open the action menu.
+- Double-click a session row to open the action menu.
+- Click a session table header to sort by that column; click it again to reverse direction.
 - `h` write full handoff
+- `H` select visible sessions to combine into one handoff; same-project sessions start checked
 - `s` write compact summary
 - `a` archive session file
 - `e` export resume package
 - `y` copy selected session id to clipboard
 - `o` open a terminal in the session cwd and resume the selected agent session
-- `i` set injection source, then inject it into a different selected session after backup
+- `i` open source/target injection picker, optionally combine same-project sources, then inject after backup
 - `c` compare selected sessions
 - `b` show bulk cleanup plan for visible sessions
 - `v` toggle ID-first table view

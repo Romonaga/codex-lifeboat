@@ -25,12 +25,14 @@ from .recovery import (
     RecoveryContext,
     RestoreResult,
     bulk_cleanup_plan,
+    inject_combined_handoff_note_into,
     inject_handoff_note,
     inject_handoff_note_into,
     list_session_backups,
     restore_session_backup,
     write_agent_handoff,
     write_agent_summary,
+    write_combined_agent_handoff,
     write_resume_package,
 )
 
@@ -199,6 +201,53 @@ class LifeboatController:
             return None, error
         return write_agent_handoff(self.config, context, scrub_profile=scrub_profile, target_agent=target_agent), None
 
+    def write_project_handoff(
+        self,
+        row: dict[str, Any],
+        visible_rows: list[dict[str, Any]],
+        *,
+        scrub_profile: str,
+        target_agent: str,
+    ):
+        contexts, error = self.same_project_contexts(row, visible_rows)
+        if error:
+            return None, error
+        try:
+            return write_combined_agent_handoff(
+                self.config,
+                contexts,
+                scrub_profile=scrub_profile,
+                target_agent=target_agent,
+            ), None
+        except ValueError as exc:
+            return None, str(exc)
+
+    def write_combined_handoff(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        scrub_profile: str,
+        target_agent: str,
+    ):
+        contexts: list[RecoveryContext] = []
+        for row in rows:
+            context, error = self.recovery_context(row)
+            if not context:
+                session_id = str(row.get("id") or "unknown")
+                return None, f"Selected session cannot be included ({session_id}): {error}"
+            contexts.append(context)
+        if not contexts:
+            return None, "Select at least one session with a readable session file."
+        try:
+            return write_combined_agent_handoff(
+                self.config,
+                contexts,
+                scrub_profile=scrub_profile,
+                target_agent=target_agent,
+            ), None
+        except ValueError as exc:
+            return None, str(exc)
+
     def write_summary(self, row: dict[str, Any], *, scrub_profile: str):
         context, error = self.recovery_context(row)
         if not context:
@@ -252,6 +301,66 @@ class LifeboatController:
             ),
             None,
         )
+
+    def inject_sources_into(
+        self,
+        source_contexts: list[RecoveryContext],
+        target_row: dict[str, Any],
+        *,
+        scrub_profile: str,
+        target_agent: str,
+    ) -> tuple[InjectionResult | None, str | None]:
+        target_context, error = self.recovery_context(target_row)
+        if not target_context:
+            return None, error
+        source_contexts = [context for context in source_contexts if context.session_file_path != target_context.session_file_path]
+        if not source_contexts:
+            return None, "Select at least one source session that is different from the target."
+        missing = [context.session_id for context in source_contexts if not context.session_file_path.is_file()]
+        if missing:
+            return None, f"Source session file is no longer available: {missing[0]}"
+        if len(source_contexts) == 1:
+            return (
+                inject_handoff_note_into(
+                    self.config,
+                    source_contexts[0],
+                    target_context,
+                    scrub_profile=scrub_profile,
+                    target_agent=target_agent,
+                ),
+                None,
+            )
+        try:
+            return (
+                inject_combined_handoff_note_into(
+                    self.config,
+                    source_contexts,
+                    target_context,
+                    scrub_profile=scrub_profile,
+                    target_agent=target_agent,
+                ),
+                None,
+            )
+        except ValueError as exc:
+            return None, str(exc)
+
+    def same_project_rows(self, row: dict[str, Any], visible_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        project = project_key(row)
+        return [candidate for candidate in visible_rows if project_key(candidate) == project]
+
+    def same_project_contexts(
+        self,
+        row: dict[str, Any],
+        visible_rows: list[dict[str, Any]],
+    ) -> tuple[list[RecoveryContext], str | None]:
+        contexts: list[RecoveryContext] = []
+        for candidate in self.same_project_rows(row, visible_rows):
+            context, _error = self.recovery_context(candidate)
+            if context:
+                contexts.append(context)
+        if not contexts:
+            return [], "No readable session files are available for this project."
+        return contexts, None
 
     def toggle_pin(self, row: dict[str, Any]) -> tuple[bool, str]:
         sid = str(row.get("id") or "")

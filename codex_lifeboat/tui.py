@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import time
+
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Header, Input, Label, ListItem, ListView, Markdown, Select, Static
+from textual.widgets import Button, Checkbox, DataTable, Header, Input, Label, ListItem, ListView, Markdown, Select, Static
 
+from codex_lifeboat import __version__
 from codex_lifeboat.controller import LifeboatController
 from codex_lifeboat.doctor import report as doctor_report
-from codex_lifeboat.intelligence import project_label
+from codex_lifeboat.intelligence import project_key, project_label
 from codex_lifeboat.recovery import RecoveryContext
 from codex_lifeboat.sessions import iso_from_epoch
 from codex_lifeboat.text import human_size
@@ -25,23 +28,67 @@ from codex_lifeboat.views import (
 )
 
 
-CONTEXT_ACTIONS = [
-    ("launch_resume", "Open/resume in terminal", "o"),
-    ("copy_session_id", "Copy session ID", "y"),
-    ("handoff", "Write full handoff", "h"),
-    ("summary", "Write compact summary", "s"),
-    ("archive", "Archive session file", "a"),
-    ("export_resume", "Export resume package", "e"),
-    ("inject_handoff", "Inject handoff", "i"),
-    ("compare", "Compare sessions", "c"),
-    ("toggle_pin", "Toggle pin", "p"),
-    ("restore_preview", "Preview backup restore", "u"),
-    ("purge_preview", "Dry-run purge", "x"),
-    ("doctor", "Doctor report", "d"),
-    ("bulk_cleanup", "Bulk cleanup plan", "b"),
-    ("toggle_id_view", "Toggle ID view", "v"),
-    ("refresh", "Refresh sessions", "r"),
+CONTEXT_SECTIONS = [
+    (
+        "Open",
+        [
+            ("launch_resume", "Open/resume in terminal", "o"),
+            ("copy_session_id", "Copy session ID", "y"),
+        ],
+    ),
+    (
+        "Recover",
+        [
+            ("handoff", "Write full handoff", "h"),
+            ("project_handoff", "Write combined handoff", "H"),
+            ("summary", "Write compact summary", "s"),
+            ("export_resume", "Export resume package", "e"),
+            ("inject_handoff", "Inject handoff", "i"),
+            ("compare", "Compare sessions", "c"),
+        ],
+    ),
+    (
+        "Manage",
+        [
+            ("toggle_pin", "Toggle pin", "p"),
+            ("archive", "Archive session file", "a"),
+            ("restore_preview", "Preview backup restore", "u"),
+            ("purge_preview", "Dry-run purge", "x"),
+        ],
+    ),
+    (
+        "Inspect",
+        [
+            ("doctor", "Doctor report", "d"),
+            ("bulk_cleanup", "Bulk cleanup plan", "b"),
+        ],
+    ),
+    (
+        "View",
+        [
+            ("toggle_id_view", "Toggle ID view", "v"),
+            ("refresh", "Refresh sessions", "r"),
+        ],
+    ),
 ]
+CONTEXT_ACTIONS = [action for _section, actions in CONTEXT_SECTIONS for action in actions]
+CONTEXT_ACTION_BY_KEY = {key: action for action, _label, key in CONTEXT_ACTIONS}
+
+
+STANDARD_COLUMNS = ("pin", "ready", "project", "file", "artifacts", "size", "updated", "title", "session")
+ID_COLUMNS = ("pin", "session", "ready", "file", "size", "updated", "title")
+COLUMN_LABELS = {
+    "pin": "Pin",
+    "ready": "Ready",
+    "project": "Project",
+    "file": "File",
+    "artifacts": "Artifacts",
+    "size": "Size",
+    "updated": "Updated",
+    "title": "Title",
+    "session": "Session ID",
+}
+DEFAULT_DESCENDING_SORTS = {"artifacts", "ready", "size", "updated"}
 
 
 class SessionContextMenu(ModalScreen[str | None]):
@@ -52,24 +99,304 @@ class SessionContextMenu(ModalScreen[str | None]):
         Binding("q", "close", "Close"),
     ]
 
-    def __init__(self, session_id: str | None) -> None:
+    def __init__(self, row: dict | None) -> None:
         super().__init__()
-        self.session_id = session_id
+        self.row = row
 
     def compose(self) -> ComposeResult:
-        title = f"Session Actions: {self.session_id}" if self.session_id else "Session Actions"
         with Container(id="context-menu"):
-            yield Static(title, id="context-menu-title")
-            yield ListView(
-                *[
-                    ListItem(Label(f"{label}  [{key}]"), id=action)
-                    for action, label, key in CONTEXT_ACTIONS
-                ],
-                id="context-actions",
+            yield Static(self.context_title(), id="context-menu-title")
+            yield ListView(*self.context_items(), id="context-actions")
+
+    def context_title(self) -> str:
+        if not self.row:
+            return "Session Actions"
+        session_id = str(self.row.get("id") or "")
+        title = str(self.row.get("title") or self.row.get("preview") or "").replace("\n", " ")
+        heading = title[:72] if title else session_id
+        project = project_label(self.row, max_chars=48)
+        updated = iso_from_epoch(self.row.get("updated_at"))[:19] or "unknown"
+        return f"{heading}\nProject: {project}\nUpdated: {updated}"
+
+    def context_items(self) -> list[ListItem]:
+        items: list[ListItem] = []
+        for section, actions in CONTEXT_SECTIONS:
+            items.append(
+                ListItem(
+                    Label(section.upper(), classes="context-section-label", markup=False),
+                    classes="context-section",
+                    disabled=True,
+                )
             )
+            for action, label, key in actions:
+                items.append(
+                    ListItem(
+                        Label(self.context_action_label(label, key), classes="context-action-label"),
+                        id=action,
+                        classes="context-action",
+                    )
+                )
+        return items
+
+    def context_action_label(self, label: str, key: str) -> str:
+        first, separator, rest = label.partition(" ")
+        suffix = f"{separator}{rest}" if rest else ""
+        return f"  {first}([bold #ffcc66]{key}[/]){suffix}"
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if event.item.disabled:
+            return
         self.dismiss(event.item.id)
+
+    def on_key(self, event: events.Key) -> None:
+        action = CONTEXT_ACTION_BY_KEY.get(event.character or event.key)
+        if not action:
+            return
+        event.prevent_default()
+        event.stop()
+        self.dismiss(action)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class CombinedHandoffPicker(ModalScreen[tuple[str, ...] | None]):
+    """Picker for selecting the exact sessions to combine into one handoff."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("q", "close", "Close"),
+    ]
+
+    def __init__(self, rows: list[dict], selected_session_id: str | None) -> None:
+        super().__init__()
+        self.rows = rows[:500]
+        selected_row = self.row_by_id(selected_session_id)
+        selected_project = project_key(selected_row) if selected_row else None
+        self.selected_ids = {
+            str(row.get("id") or "")
+            for row in self.rows
+            if str(row.get("id") or "") and (selected_project is None or project_key(row) == selected_project)
+        }
+
+    def compose(self) -> ComposeResult:
+        with Container(id="combine-picker"):
+            yield Static("Combined Handoff", id="combine-title")
+            yield ListView(*self.list_items(), id="combine-sessions")
+            yield Static("", id="combine-status")
+            with Horizontal(id="combine-buttons"):
+                yield Button("Cancel", id="combine-cancel")
+                yield Button("Write Handoff", id="combine-confirm", variant="primary")
+
+    def on_mount(self) -> None:
+        self.refresh_status()
+        self.query_one("#combine-sessions", ListView).focus()
+
+    def row_by_id(self, session_id: str | None) -> dict | None:
+        if not session_id:
+            return None
+        return next((row for row in self.rows if str(row.get("id") or "") == session_id), None)
+
+    def list_items(self) -> list[ListItem]:
+        return [
+            ListItem(Label(self.row_label(row), markup=False), id=f"combine-{row.get('id')}")
+            for row in self.rows
+            if row.get("id")
+        ]
+
+    def row_label(self, row: dict) -> str:
+        session_id = str(row.get("id") or "")
+        checked = "x" if session_id in self.selected_ids else " "
+        project = project_label(row, max_chars=18)
+        updated = iso_from_epoch(row.get("updated_at"))[:10]
+        title = str(row.get("title") or row.get("preview") or "").replace("\n", " ")
+        return f"[{checked}] {project:<18} {updated:<10} {session_id[:8]} {title[:48]}"
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        item_id = event.item.id or ""
+        _prefix, _separator, session_id = item_id.partition("-")
+        if not session_id:
+            return
+        if session_id in self.selected_ids:
+            self.selected_ids.remove(session_id)
+        else:
+            self.selected_ids.add(session_id)
+        row = self.row_by_id(session_id)
+        if row:
+            event.item.query_one(Label).update(self.row_label(row))
+        self.refresh_status()
+
+    def refresh_status(self) -> None:
+        count = len(self.selected_ids)
+        self.query_one("#combine-status", Static).update(f"{count} session{'s' if count != 1 else ''} selected.")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "combine-cancel":
+            self.dismiss(None)
+            return
+        if event.button.id == "combine-confirm":
+            self.action_confirm()
+
+    def action_confirm(self) -> None:
+        if not self.selected_ids:
+            self.refresh_status()
+            return
+        ordered = tuple(str(row.get("id") or "") for row in self.rows if str(row.get("id") or "") in self.selected_ids)
+        self.dismiss(ordered)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class InjectionPicker(ModalScreen[tuple[tuple[str, ...], str] | None]):
+    """Two-column source/target picker for handoff injection."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("q", "close", "Close"),
+    ]
+
+    def __init__(self, rows: list[dict], selected_session_id: str | None) -> None:
+        super().__init__()
+        self.rows = rows[:500]
+        self.selected_source_id = selected_session_id or self.first_session_id()
+        self.selected_target_id = self.first_session_id(excluding=self.selected_source_id)
+        self.combine_project = False
+
+    def compose(self) -> ComposeResult:
+        with Container(id="inject-picker"):
+            yield Static("Inject Handoff", id="inject-title")
+            with Horizontal(id="inject-columns"):
+                with Vertical(classes="inject-column"):
+                    yield Static("Source", classes="inject-column-title")
+                    yield ListView(*self.list_items("source"), id="inject-source")
+                with Vertical(classes="inject-column"):
+                    yield Static("Target", classes="inject-column-title")
+                    yield ListView(*self.list_items("target"), id="inject-target")
+            yield Checkbox("Combine same project as source", id="inject-combine-project")
+            yield Static("", id="inject-status")
+            with Horizontal(id="inject-buttons"):
+                yield Button("Cancel", id="inject-cancel")
+                yield Button("Inject", id="inject-confirm", variant="primary")
+
+    def on_mount(self) -> None:
+        self.refresh_status()
+        self.query_one("#inject-source", ListView).focus()
+
+    def first_session_id(self, *, excluding: str | None = None) -> str | None:
+        for row in self.rows:
+            session_id = str(row.get("id") or "")
+            if session_id and session_id != excluding:
+                return session_id
+        return None
+
+    def row_by_id(self, session_id: str | None) -> dict | None:
+        if not session_id:
+            return None
+        return next((row for row in self.rows if str(row.get("id") or "") == session_id), None)
+
+    def source_ids_for_action(self) -> tuple[str, ...]:
+        source_row = self.row_by_id(self.selected_source_id)
+        if not source_row:
+            return ()
+        if not self.combine_project:
+            return (self.selected_source_id,) if self.selected_source_id else ()
+        source_project = project_key(source_row)
+        return tuple(
+            str(row.get("id") or "")
+            for row in self.rows
+            if str(row.get("id") or "") and project_key(row) == source_project and str(row.get("id") or "") != self.selected_target_id
+        )
+
+    def list_items(self, side: str) -> list[ListItem]:
+        selected = self.selected_source_id if side == "source" else self.selected_target_id
+        items: list[ListItem] = []
+        for row in self.rows:
+            session_id = str(row.get("id") or "")
+            if not session_id:
+                continue
+            marker = ">" if session_id == selected else " "
+            items.append(ListItem(Label(f"{marker} {self.row_label(row)}"), id=f"{side}-{session_id}"))
+        return items
+
+    def row_label(self, row: dict) -> str:
+        session_id = str(row.get("id") or "")
+        title = str(row.get("title") or row.get("preview") or "").replace("\n", " ")
+        project = project_label(row, max_chars=18)
+        return f"{project:<18} {session_id[:8]} {title[:52]}"
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        item_id = event.item.id or ""
+        side, _, session_id = item_id.partition("-")
+        if not session_id:
+            return
+        if side == "source":
+            self.selected_source_id = session_id
+            if self.selected_target_id == session_id:
+                self.selected_target_id = self.first_session_id(excluding=session_id)
+            self.refresh_list_labels("source")
+            self.refresh_list_labels("target")
+            self.refresh_status()
+            self.query_one("#inject-target", ListView).focus()
+            return
+        if side == "target":
+            self.selected_target_id = session_id
+            self.refresh_list_labels("target")
+            self.refresh_status()
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        if event.checkbox.id != "inject-combine-project":
+            return
+        self.combine_project = bool(event.value)
+        self.refresh_status()
+
+    def refresh_list_labels(self, side: str) -> None:
+        widget_id = "#inject-source" if side == "source" else "#inject-target"
+        list_view = self.query_one(widget_id, ListView)
+        selected = self.selected_source_id if side == "source" else self.selected_target_id
+        rows_by_id = {str(row.get("id") or ""): row for row in self.rows}
+        for item in list_view.children:
+            item_id = item.id or ""
+            _, _, session_id = item_id.partition("-")
+            row = rows_by_id.get(session_id)
+            if not row:
+                continue
+            marker = ">" if session_id == selected else " "
+            item.query_one(Label).update(f"{marker} {self.row_label(row)}")
+
+    def refresh_status(self) -> None:
+        status = self.query_one("#inject-status", Static)
+        if not self.selected_source_id:
+            status.update("Select a source session.")
+            return
+        if not self.selected_target_id:
+            status.update("Select a different target session.")
+            return
+        if self.selected_source_id == self.selected_target_id:
+            status.update("Source and target must be different sessions.")
+            return
+        source_ids = self.source_ids_for_action()
+        if self.combine_project:
+            status.update(f"Combining {len(source_ids)} source sessions -> target {self.selected_target_id}")
+            return
+        status.update(f"Source {self.selected_source_id} -> target {self.selected_target_id}")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "inject-cancel":
+            self.dismiss(None)
+            return
+        if event.button.id == "inject-confirm":
+            self.action_inject()
+
+    def action_inject(self) -> None:
+        source_ids = self.source_ids_for_action()
+        if not source_ids or not self.selected_target_id:
+            self.refresh_status()
+            return
+        if self.selected_target_id in source_ids:
+            self.refresh_status()
+            return
+        self.dismiss((source_ids, self.selected_target_id))
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -102,19 +429,39 @@ class LifeboatTui(App[None]):
         padding: 1;
     }
 
-    #agent,
-    #search,
-    #controls {
+    #toolbar,
+    #search {
         margin-bottom: 1;
     }
 
-    #controls {
-        height: 3;
+    #toolbar {
+        height: 1;
     }
 
     .compact-select {
         width: 1fr;
         margin-right: 1;
+    }
+
+    #agent {
+        width: 2fr;
+    }
+
+    #group {
+        width: 1fr;
+    }
+
+    #target {
+        width: 1fr;
+    }
+
+    #scrub {
+        width: 1fr;
+        margin-right: 0;
+    }
+
+    #search {
+        height: 1;
     }
 
     #sessions {
@@ -136,15 +483,24 @@ class LifeboatTui(App[None]):
         align: center middle;
     }
 
+    InjectionPicker {
+        align: center middle;
+    }
+
+    CombinedHandoffPicker {
+        align: center middle;
+    }
+
     #context-menu {
-        width: 52;
-        max-height: 22;
+        width: 58;
+        max-height: 30;
         border: round #3f8cff;
         background: #161c22;
         padding: 1;
     }
 
     #context-menu-title {
+        height: 3;
         text-style: bold;
         color: #7cc7ff;
         margin-bottom: 1;
@@ -154,10 +510,123 @@ class LifeboatTui(App[None]):
         height: 1fr;
     }
 
-    .title {
+    .context-section {
+        height: 1;
+        color: #7cc7ff;
+        background: #101418;
+    }
+
+    .context-section-label {
+        text-style: bold;
+        color: #7cc7ff;
+    }
+
+    .context-action {
+        height: 1;
+    }
+
+    .context-action-label {
+        color: #e8edf2;
+    }
+
+    #combine-picker {
+        width: 92%;
+        height: 82%;
+        border: round #3f8cff;
+        background: #161c22;
+        padding: 1;
+    }
+
+    #combine-title {
+        height: 1;
         text-style: bold;
         color: #7cc7ff;
         margin-bottom: 1;
+    }
+
+    #combine-sessions {
+        height: 1fr;
+        border: round #58616d;
+    }
+
+    #combine-status {
+        height: 3;
+        color: #e8edf2;
+        padding: 0 1;
+    }
+
+    #combine-buttons {
+        height: 3;
+        align-horizontal: right;
+    }
+
+    #combine-cancel,
+    #combine-confirm {
+        margin-left: 1;
+    }
+
+    #inject-picker {
+        width: 90%;
+        height: 82%;
+        border: round #3f8cff;
+        background: #161c22;
+        padding: 1;
+    }
+
+    #inject-title {
+        height: 1;
+        text-style: bold;
+        color: #7cc7ff;
+        margin-bottom: 1;
+    }
+
+    #inject-columns {
+        height: 1fr;
+    }
+
+    .inject-column {
+        width: 1fr;
+        margin-right: 1;
+    }
+
+    .inject-column-title {
+        height: 1;
+        text-style: bold;
+        color: #e8edf2;
+    }
+
+    #inject-source,
+    #inject-target {
+        height: 1fr;
+        border: round #58616d;
+    }
+
+    #inject-combine-project {
+        height: 1;
+        margin-top: 1;
+    }
+
+    #inject-status {
+        height: 3;
+        color: #e8edf2;
+        padding: 0 1;
+    }
+
+    #inject-buttons {
+        height: 3;
+        align-horizontal: right;
+    }
+
+    #inject-cancel,
+    #inject-confirm {
+        margin-left: 1;
+    }
+
+    .title {
+        width: auto;
+        text-style: bold;
+        color: #7cc7ff;
+        margin-right: 1;
     }
     """
 
@@ -168,6 +637,7 @@ class LifeboatTui(App[None]):
         Binding("/", "focus_search", "Search"),
         Binding("escape", "clear_search", "Clear"),
         Binding("h", "handoff", "Handoff"),
+        Binding("H", "project_handoff", "Combined handoff"),
         Binding("s", "summary", "Summary"),
         Binding("a", "archive", "Archive"),
         Binding("e", "export_resume", "Export"),
@@ -194,32 +664,39 @@ class LifeboatTui(App[None]):
         self.pending_restore: str | None = None
         self.show_session_ids = False
         self.inject_source_context: RecoveryContext | None = None
+        self.sort_column: str | None = None
+        self.sort_descending = False
+        self.last_table_click: tuple[float, int | None] = (0.0, None)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(id="main"):
             with Vertical(id="left"):
-                yield Static("Sessions", classes="title")
-                yield Select(
-                    [(self.controller.agent_label(choice.key), choice.key) for choice in self.controller.agent_choices],
-                    value=self.controller.agent_key,
-                    allow_blank=False,
-                    id="agent",
-                )
-                with Horizontal(id="controls"):
+                with Horizontal(id="toolbar"):
+                    yield Static("Sessions", classes="title")
+                    yield Select(
+                        [(self.controller.agent_label(choice.key), choice.key) for choice in self.controller.agent_choices],
+                        value=self.controller.agent_key,
+                        allow_blank=False,
+                        id="agent",
+                        classes="compact-select",
+                        compact=True,
+                    )
                     yield Select(
                         [("Recent", "recent"), ("Project", "project"), ("Readiness", "readiness")],
                         value="recent",
                         allow_blank=False,
                         id="group",
                         classes="compact-select",
+                        compact=True,
                     )
                     yield Select(
-                        [("Same target", "same"), ("Target Codex", "codex"), ("Target Claude", "claude")],
+                        [("Same", "same"), ("Codex", "codex"), ("Claude", "claude")],
                         value="same",
                         allow_blank=False,
                         id="target",
                         classes="compact-select",
+                        compact=True,
                     )
                     yield Select(
                         [("Private", "private"), ("Shareable", "shareable"), ("Public", "public")],
@@ -227,8 +704,9 @@ class LifeboatTui(App[None]):
                         allow_blank=False,
                         id="scrub",
                         classes="compact-select",
+                        compact=True,
                     )
-                yield Input(placeholder="Filter text or agent:/project:/cwd:/model:/status:/file:/artifact:", id="search")
+                yield Input(placeholder="Filter text or agent:/project:/cwd:/model:/status:/file:/artifact:", id="search", compact=True)
                 yield DataTable(id="sessions", cursor_type="row", zebra_stripes=True)
             with Vertical(id="right"):
                 yield Static("Session Details", classes="title")
@@ -236,12 +714,12 @@ class LifeboatTui(App[None]):
         yield Static("", id="status")
 
     def on_mount(self) -> None:
-        self.title = "Agent Lifeboat"
+        self.title = f"Agent Lifeboat {__version__}"
         self.install_tooltips()
         self.refresh_rows()
         self.table.focus()
         self.set_status(
-            f"Ready on {self.controller.store.display_name}. Use arrows to move, right-click for actions, / to search."
+            f"Ready on {self.controller.store.display_name}. Use arrows to move, double-click for actions, / to search."
         )
 
     @property
@@ -284,43 +762,52 @@ class LifeboatTui(App[None]):
         )
         self.search.tooltip = "Filter by text, or use agent:, project:, cwd:, model:, status:, file:, and artifact: prefixes."
         self.table.tooltip = (
-            "Use arrow keys to select a session. Right-click for actions. Press v to toggle an ID-first table view."
+            "Use arrow keys to select a session. Click column headers to sort. Double-click a row for actions. Press v to toggle an ID-first table view."
         )
         self.details.tooltip = "Selected session details, artifact history, transcript preview, readiness reasons, and available actions."
         self.status.tooltip = "Last action result or warning. Injection and purge write backups or recovery context first."
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
-        if event.button != 3:
+        if event.button != 1 or event.widget is not self.table:
+            return
+        table = self.table
+        hover_row = table.hover_row
+        now = time.monotonic()
+        last_time, last_row = self.last_table_click
+        self.last_table_click = (now, hover_row)
+        if hover_row is None or hover_row != last_row or now - last_time > 0.45:
             return
         event.prevent_default()
         event.stop()
-        self.select_hovered_table_row()
-        self.open_context_menu()
+        if self.select_hovered_table_row():
+            self.open_context_menu()
 
-    def select_hovered_table_row(self) -> None:
+    def select_hovered_table_row(self) -> bool:
         table = self.table
         hover_row = table.hover_row
         if hover_row is None or not table.is_valid_row_index(hover_row):
-            return
+            return False
         try:
             values = table.get_row_at(hover_row)
         except Exception:
-            return
+            return False
         if not values:
-            return
+            return False
         session_id = str(values[1] if self.show_session_ids and len(values) > 1 else values[-1])
         if not session_id:
-            return
+            return False
         self.selected_session_id = session_id
         self.pending_purge = None
         self.pending_restore = None
         self.render_details()
+        return True
 
     def open_context_menu(self) -> None:
-        if not self.current_row():
+        row = self.current_row()
+        if not row:
             self.set_status("No session selected.")
             return
-        self.push_screen(SessionContextMenu(self.selected_session_id), self.handle_context_action)
+        self.push_screen(SessionContextMenu(row), self.handle_context_action)
 
     def handle_context_action(self, action: str | None) -> None:
         if not action:
@@ -330,6 +817,7 @@ class LifeboatTui(App[None]):
             "launch_resume": self.action_launch_resume,
             "copy_session_id": self.action_copy_session_id,
             "handoff": self.action_handoff,
+            "project_handoff": self.action_project_handoff,
             "summary": self.action_summary,
             "archive": self.action_archive,
             "export_resume": self.action_export_resume,
@@ -376,12 +864,9 @@ class LifeboatTui(App[None]):
     def render_table(self) -> None:
         table = self.table
         table.clear(columns=True)
-        if self.show_session_ids:
-            table.add_columns("Pin", "Session ID", "Ready", "File", "Size", "Updated", "Title")
-        else:
-            table.add_columns("Pin", "Ready", "Project", "File", "Artifacts", "Size", "Updated", "Title", "Session")
+        table.add_columns(*[self.column_label(column) for column in self.table_columns()])
         pinned = self.controller.pins.load()
-        for row in self.rows[:500]:
+        for row in self.sorted_rows()[:500]:
             sid = str(row.get("id") or "")
             state = self.controller.state_for(row)
             title = row.get("title") or row.get("preview") or ""
@@ -409,6 +894,67 @@ class LifeboatTui(App[None]):
                     sid,
                     key=sid,
                 )
+
+    def table_columns(self) -> tuple[str, ...]:
+        return ID_COLUMNS if self.show_session_ids else STANDARD_COLUMNS
+
+    def column_label(self, column: str) -> str:
+        label = COLUMN_LABELS[column]
+        if column != self.sort_column:
+            return label
+        return f"{label} {'v' if self.sort_descending else '^'}"
+
+    def sorted_rows(self) -> list[dict]:
+        if not self.sort_column:
+            return list(self.rows)
+        return sorted(
+            self.rows,
+            key=self.sort_key_for(self.sort_column),
+            reverse=self.sort_descending,
+        )
+
+    def sort_key_for(self, column: str):
+        pinned = self.controller.pins.load()
+
+        def key(row: dict) -> tuple:
+            sid = str(row.get("id") or "")
+            state = self.controller.state_for(row)
+            title = str(row.get("title") or row.get("preview") or "")
+            values = {
+                "pin": 1 if self.controller.pin_key(sid) in pinned else 0,
+                "ready": state.readiness.rank,
+                "project": project_label(row, max_chars=80).lower(),
+                "file": self.controller.store.file_status(row).lower(),
+                "artifacts": (
+                    len(state.artifacts.handoffs)
+                    + len(state.artifacts.summaries)
+                    + len(state.artifacts.archives)
+                    + len(state.artifacts.resume_packages)
+                ),
+                "size": state.size,
+                "updated": int(row.get("updated_at") or 0),
+                "title": title.lower(),
+                "session": sid,
+            }
+            value = values.get(column, "")
+            return (value is None, value, sid)
+
+        return key
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        columns = self.table_columns()
+        if event.column_index < 0 or event.column_index >= len(columns):
+            return
+        column = columns[event.column_index]
+        if column == self.sort_column:
+            self.sort_descending = not self.sort_descending
+        else:
+            self.sort_column = column
+            self.sort_descending = column in DEFAULT_DESCENDING_SORTS
+        self.render_table()
+        self.table.focus()
+        direction = "descending" if self.sort_descending else "ascending"
+        self.set_status(f"Sorted by {COLUMN_LABELS[column]} ({direction}).")
 
     def current_row(self) -> dict | None:
         if not self.rows:
@@ -523,6 +1069,30 @@ class LifeboatTui(App[None]):
         self.refresh_rows()
         self.set_status(f"Wrote handoff: {result.path}")
 
+    def action_project_handoff(self) -> None:
+        row = self.current_row()
+        if not row:
+            return
+        self.push_screen(CombinedHandoffPicker(self.rows, self.selected_session_id), self.handle_combined_handoff_selection)
+
+    def handle_combined_handoff_selection(self, session_ids: tuple[str, ...] | None) -> None:
+        self.table.focus()
+        if not session_ids:
+            self.set_status("Combined handoff cancelled.")
+            return
+        selected = set(session_ids)
+        rows = [row for row in self.rows if str(row.get("id") or "") in selected]
+        result, error = self.controller.write_combined_handoff(
+            rows,
+            scrub_profile=self.scrub_profile,
+            target_agent=self.target_agent,
+        )
+        if error:
+            self.set_status(error)
+            return
+        self.refresh_rows()
+        self.set_status(f"Wrote combined handoff from {len(rows)} sessions: {result.path}")
+
     def action_summary(self) -> None:
         row = self.current_row()
         if not row:
@@ -583,37 +1153,44 @@ class LifeboatTui(App[None]):
         self.set_status(message)
 
     def action_inject_handoff(self) -> None:
-        row = self.current_row()
-        if not row:
+        if len(self.rows) < 2:
+            self.set_status("At least two visible sessions are required for injection.")
             return
-        target_context, context_error = self.controller.recovery_context(row)
-        if not target_context:
-            self.set_status(context_error or "Selected session cannot be used for injection.")
+
+        self.push_screen(InjectionPicker(self.rows, self.selected_session_id), self.handle_injection_selection)
+
+    def handle_injection_selection(self, selection: tuple[tuple[str, ...], str] | None) -> None:
+        self.table.focus()
+        if not selection:
+            self.set_status("Injection cancelled.")
             return
-        if not self.inject_source_context:
-            self.inject_source_context = target_context
-            self.set_status(f"Injection source set: {target_context.session_id}. Select target session and press i again.")
+        source_ids, target_id = selection
+        source_rows = [row for row in self.rows if str(row.get("id") or "") in source_ids]
+        target_row = next((row for row in self.rows if str(row.get("id") or "") == target_id), None)
+        if not source_rows or not target_row:
+            self.set_status("Injection selection is no longer visible. Refresh and try again.")
             return
-        if self.inject_source_context.session_id == target_context.session_id:
-            cleared = self.inject_source_context.session_id
-            self.inject_source_context = None
-            self.set_status(f"Injection source cleared: {cleared}.")
-            return
-        result, error = self.controller.inject_into(
-            self.inject_source_context,
-            row,
+        source_contexts: list[RecoveryContext] = []
+        for source_row in source_rows:
+            source_context, context_error = self.controller.recovery_context(source_row)
+            if not source_context:
+                self.set_status(context_error or "Selected source session cannot be used for injection.")
+                return
+            source_contexts.append(source_context)
+        result, error = self.controller.inject_sources_into(
+            source_contexts,
+            target_row,
             scrub_profile=self.scrub_profile,
             target_agent=self.target_agent,
         )
         if error:
             self.set_status(error)
             return
-        source_id = self.inject_source_context.session_id
-        target_id = target_context.session_id
-        self.inject_source_context = None
+        self.selected_session_id = target_id
         self.refresh_rows()
         self.details.update(injection_markdown(result))
-        self.set_status(f"Injected {source_id} into {target_id}. Backup: {result.backup_path}")
+        source_label = source_ids[0] if len(source_ids) == 1 else f"{len(source_ids)} sessions"
+        self.set_status(f"Injected {source_label} into {target_id}. Backup: {result.backup_path}")
 
     def action_compare(self) -> None:
         row = self.current_row()

@@ -120,6 +120,81 @@ def write_agent_summary(config: AppConfig, context: RecoveryContext, *, scrub_pr
     )
 
 
+def write_combined_agent_handoff(
+    config: AppConfig,
+    contexts: list[RecoveryContext],
+    *,
+    scrub_profile: str = "shareable",
+    target_agent: str = "same",
+) -> WriteResult:
+    contexts = [context for context in contexts if context.session_file_path.is_file()]
+    if not contexts:
+        raise ValueError("No readable source sessions were selected.")
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    output_path = config.output_dir / f"{contexts[0].agent_key}-combined-{contexts[0].session_id[:8]}-{stamp}-handoff.md"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    parts = [
+        write_agent_handoff(config, context, scrub_profile=scrub_profile, target_agent=target_agent)
+        for context in contexts
+    ]
+    with output_path.open("w", encoding="utf-8") as out:
+        out.write("# Combined Agent Handoff\n\n")
+        out.write("Use this to continue from multiple related sessions.\n\n")
+        out.write("## Source Sessions\n\n")
+        for context in contexts:
+            out.write(f"- `{context.session_id}`: `{context.session_file_path}`\n")
+        out.write("\n## Restart Prompt\n\n")
+        out.write(
+            "I am continuing from multiple related AI sessions. Merge the facts, constraints, current files, "
+            "decisions, blockers, and next steps from each source section below. Prefer the newest source when "
+            "two sessions conflict, unless an older source has more specific implementation detail.\n\n"
+        )
+        for context, part in zip(contexts, parts):
+            out.write(f"\n## Source: {context.session_id}\n\n")
+            out.write(part.path.read_text(encoding="utf-8", errors="replace"))
+            out.write("\n")
+    append_target_note(output_path, contexts[0].agent_key, target_agent, scrub_profile)
+    return WriteResult(
+        path=output_path,
+        messages=sum(part.messages for part in parts),
+        tool_calls=sum(part.tool_calls for part in parts),
+        tool_outputs=sum(part.tool_outputs for part in parts),
+        split_parts=[part.path for part in parts],
+    )
+
+
+def write_combined_agent_summary(
+    config: AppConfig,
+    contexts: list[RecoveryContext],
+    *,
+    scrub_profile: str = "shareable",
+) -> WriteResult:
+    contexts = [context for context in contexts if context.session_file_path.is_file()]
+    if not contexts:
+        raise ValueError("No readable source sessions were selected.")
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    output_path = config.output_dir / f"{contexts[0].agent_key}-combined-{contexts[0].session_id[:8]}-{stamp}-summary.md"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    parts = [write_agent_summary(config, context, scrub_profile=scrub_profile) for context in contexts]
+    with output_path.open("w", encoding="utf-8") as out:
+        out.write("# Combined Agent Summary\n\n")
+        out.write("This summary combines related source sessions for injection or restart.\n\n")
+        out.write("## Source Sessions\n\n")
+        for context in contexts:
+            out.write(f"- `{context.session_id}`: `{context.session_file_path}`\n")
+        for context, part in zip(contexts, parts):
+            out.write(f"\n## Source: {context.session_id}\n\n")
+            out.write(part.path.read_text(encoding="utf-8", errors="replace"))
+            out.write("\n")
+    return WriteResult(
+        path=output_path,
+        messages=sum(part.messages for part in parts),
+        tool_calls=sum(part.tool_calls for part in parts),
+        tool_outputs=sum(part.tool_outputs for part in parts),
+        split_parts=[part.path for part in parts],
+    )
+
+
 def append_target_note(path: Path, source_agent: str, target_agent: str, scrub_profile: str) -> None:
     target = target_agent_name(source_agent, target_agent)
     note = (
@@ -227,6 +302,40 @@ def inject_handoff_note_into(
         text,
         target_agent=target_agent,
         source_context=source_context,
+    )
+    with target_context.session_file_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False))
+        handle.write("\n")
+    return InjectionResult(
+        session_file_path=target_context.session_file_path,
+        backup_path=backup_path,
+        source_path=summary.path,
+        injected_chars=len(text),
+    )
+
+
+def inject_combined_handoff_note_into(
+    config: AppConfig,
+    source_contexts: list[RecoveryContext],
+    target_context: RecoveryContext,
+    *,
+    scrub_profile: str = "shareable",
+    target_agent: str = "same",
+    max_chars: int = 12000,
+) -> InjectionResult:
+    summary = write_combined_agent_summary(config, source_contexts, scrub_profile=scrub_profile)
+    text = summary.path.read_text(encoding="utf-8", errors="replace")
+    if len(text) > max_chars:
+        omitted = len(text) - max_chars
+        text = f"{text[:max_chars]}\n\n[... combined injection truncated {omitted} characters; full summary: {summary.path} ...]"
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = target_context.session_file_path.with_name(f"{target_context.session_file_path.name}.bak-{stamp}")
+    shutil.copy2(target_context.session_file_path, backup_path)
+    payload = build_injection_payload(
+        target_context,
+        text,
+        target_agent=target_agent,
+        source_context=source_contexts[0],
     )
     with target_context.session_file_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False))

@@ -16,7 +16,7 @@ It currently supports Codex and Claude Code sessions. It helps you browse sessio
 - Full Markdown handoff for pasting into a fresh AI session.
 - Compact recovery summary focused on goals, paths, commands, blockers, and recent context.
 - Resume package export with handoff, summary, archive, and metadata.
-- Right-click session action menu, with keyboard shortcuts still available for power use.
+- Double-click session action menu, with keyboard shortcuts still available for power use.
 - One-key resume launcher that opens a terminal in the session cwd and starts Codex or Claude resume.
 - Target-agent handoff notes for Codex-to-Codex, Codex-to-Claude, Claude-to-Claude, and Claude-to-Codex recovery.
 - Scrub profiles for private, shareable, and public recovery artifacts.
@@ -115,9 +115,9 @@ Run the program:
 agent-lifeboat
 ```
 
-The terminal app provides a bordered session explorer, an agent selector, project/readiness grouping, filtered search, pinned-session state, readiness status, artifact history, a right-click action menu, full handoff generation, compact summary generation, archive, resume export, direct terminal resume launching, guarded injection, guarded purge, and the doctor report.
+The terminal app provides a bordered session explorer, an agent selector, project/readiness grouping, filtered search, pinned-session state, readiness status, artifact history, a double-click action menu, full handoff generation, compact summary generation, archive, resume export, direct terminal resume launching, guarded injection, guarded purge, and the doctor report.
 
-Right-click a session row to open its action menu. Keyboard shortcuts still work, but the bottom command strip is hidden to keep the screen quieter.
+Double-click a session row to open its action menu. Keyboard shortcuts still work, but the bottom command strip is hidden to keep the screen quieter.
 
 Common keys:
 
@@ -170,7 +170,7 @@ Build a standalone executable with PyInstaller:
 scripts/build-standalone.sh
 ```
 
-The standalone binary is written to `dist/agent-lifeboat`. This is optional; the normal installed program remains `agent-lifeboat`.
+The standalone binary is written to `dist/agent-lifeboat`, with a versioned copy such as `dist/agent-lifeboat-0.3.0` and build metadata in `dist/build-info.json`. This is optional; the normal installed program remains `agent-lifeboat`.
 
 ## License
 

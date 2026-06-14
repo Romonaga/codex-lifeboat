@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-lifeboat"
-version = "0.3.0"
+dynamic = ["version"]
 description = "Recover, summarize, archive, and purge oversized AI coding-agent sessions."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -47,3 +47,6 @@ agent-lifeboat = "codex_lifeboat.tui:main"
 
 [tool.setuptools]
 packages = ["codex_lifeboat"]
+
+[tool.setuptools.dynamic]
+version = { attr = "codex_lifeboat.__version__" }

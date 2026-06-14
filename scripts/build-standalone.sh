@@ -11,4 +11,7 @@ fi
 "${venv_dir}/bin/python" -m pip install -e "${repo_dir}[standalone]"
 "${venv_dir}/bin/python" -m codex_lifeboat.build
 
+version="$("${venv_dir}/bin/python" -c "from codex_lifeboat import __version__; print(__version__)")"
 echo "Built ${repo_dir}/dist/agent-lifeboat"
+echo "Built ${repo_dir}/dist/agent-lifeboat-${version}"
+echo "Wrote ${repo_dir}/dist/build-info.json"
