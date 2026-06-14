@@ -18,7 +18,7 @@ It currently supports Codex and Claude Code sessions. It helps you browse sessio
 - Resume package export with handoff, summary, archive, and metadata.
 - Target-agent handoff notes for Codex-to-Codex, Codex-to-Claude, Claude-to-Claude, and Claude-to-Codex recovery.
 - Scrub profiles for private, shareable, and public recovery artifacts.
-- Guarded handoff injection that appends a compact recovery note to a session file only after creating a backup.
+- Guarded handoff injection that copies one session's compact recovery note into another session file only after creating a backup.
 - Doctor report for local agent session health.
 - Filter search by text or `agent:`, `project:`, `cwd:`, `model:`, `status:`, `file:`, and `artifact:`.
 - Pins to protect important sessions from bulk purge.
@@ -121,16 +121,17 @@ h        write full handoff
 s        write compact summary
 a        archive session file
 e        export resume package
-i        inject compact recovery note after backup
+i        set injection source, then inject into a different selected session after backup
 c        compare two sessions
 b        show bulk cleanup plan
 p        toggle pin
 x        dry-run purge
 ctrl+x   purge after two-step confirmation
 d        doctor report
+Esc      cancel pending injection, compare, purge confirmation, or clear search
 ```
 
-Injection is intentionally conservative. It writes a compact recovery summary, backs up the session JSONL beside the original file, and appends a clearly marked synthetic user message. If an agent changes its session format, restore from the backup.
+Injection is intentionally conservative. Press `i` on the source session, move to a different target session, then press `i` again. Lifeboat writes a compact recovery summary from the source, backs up the target JSONL beside the original file, and appends a clearly marked synthetic user message to the target. If an agent changes its session format, restore from the backup.
 
 Full handoffs start with a `Continuation Snapshot` before the chronological transcript. That front-loads the latest user requests, assistant results, commands, paths, and blockers without internal tool trace details, so a new session can recover current state even if a reader or tool only shows the beginning of the file.
 

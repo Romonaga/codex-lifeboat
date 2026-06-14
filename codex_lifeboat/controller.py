@@ -23,6 +23,7 @@ from .recovery import (
     RecoveryContext,
     bulk_cleanup_plan,
     inject_handoff_note,
+    inject_handoff_note_into,
     write_agent_handoff,
     write_agent_summary,
     write_resume_package,
@@ -198,6 +199,32 @@ class LifeboatController:
         if not context:
             return None, error
         return inject_handoff_note(self.config, context, scrub_profile=scrub_profile, target_agent=target_agent), None
+
+    def inject_into(
+        self,
+        source_context: RecoveryContext,
+        target_row: dict[str, Any],
+        *,
+        scrub_profile: str,
+        target_agent: str,
+    ) -> tuple[InjectionResult | None, str | None]:
+        target_context, error = self.recovery_context(target_row)
+        if not target_context:
+            return None, error
+        if source_context.session_file_path == target_context.session_file_path:
+            return None, "Select a different target session, or clear the injection source first."
+        if not source_context.session_file_path.is_file():
+            return None, "The injection source session file is no longer available."
+        return (
+            inject_handoff_note_into(
+                self.config,
+                source_context,
+                target_context,
+                scrub_profile=scrub_profile,
+                target_agent=target_agent,
+            ),
+            None,
+        )
 
     def toggle_pin(self, row: dict[str, Any]) -> tuple[bool, str]:
         sid = str(row.get("id") or "")

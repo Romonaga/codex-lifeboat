@@ -92,9 +92,11 @@ def session_details_markdown(detail: SessionDetail, *, store_display_name: str) 
 - `s` write compact summary
 - `a` archive session file
 - `e` export resume package
-- `i` inject compact recovery note into this session after backup
+- `i` set injection source, then inject it into a different selected session after backup
 - `c` compare selected sessions
 - `b` show bulk cleanup plan for visible sessions
+- `v` toggle ID-first table view
+- `Esc` cancel pending injection, compare, purge confirmation, or clear search
 - `p` toggle pin
 - `x` dry-run purge
 - `ctrl+x` purge after two-step confirmation
@@ -138,7 +140,7 @@ def bulk_cleanup_markdown(lines: list[str]) -> str:
 def injection_markdown(result: Any) -> str:
     return (
         "# Handoff Injected\n\n"
-        f"- Session file: `{result.session_file_path}`\n"
+        f"- Target session file: `{result.session_file_path}`\n"
         f"- Backup: `{result.backup_path}`\n"
         f"- Source summary: `{result.source_path}`\n"
         f"- Injected characters: `{result.injected_chars:,}`\n\n"

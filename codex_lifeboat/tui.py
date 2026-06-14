@@ -8,6 +8,7 @@ from textual.widgets import DataTable, Footer, Header, Input, Markdown, Select, 
 from codex_lifeboat.controller import LifeboatController
 from codex_lifeboat.doctor import report as doctor_report
 from codex_lifeboat.intelligence import project_label
+from codex_lifeboat.recovery import RecoveryContext
 from codex_lifeboat.sessions import iso_from_epoch
 from codex_lifeboat.text import human_size
 from codex_lifeboat.views import (
@@ -87,6 +88,7 @@ class LifeboatTui(App[None]):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
+        Binding("v", "toggle_id_view", "ID view"),
         Binding("/", "focus_search", "Search"),
         Binding("escape", "clear_search", "Clear"),
         Binding("h", "handoff", "Handoff"),
@@ -109,6 +111,8 @@ class LifeboatTui(App[None]):
         self.selected_session_id: str | None = None
         self.compare_session_id: str | None = None
         self.pending_purge: str | None = None
+        self.show_session_ids = False
+        self.inject_source_context: RecoveryContext | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -200,16 +204,24 @@ class LifeboatTui(App[None]):
         )
         self.search.tooltip = "Filter by text, or use agent:, project:, cwd:, model:, status:, file:, and artifact: prefixes."
         self.table.tooltip = (
-            "Use arrow keys to select a session. Readiness shows whether recovery artifacts exist and whether the transcript is available."
+            "Use arrow keys to select a session. Press v to toggle an ID-first table view."
         )
         self.details.tooltip = "Selected session details, artifact history, transcript preview, readiness reasons, and available actions."
-        self.status.tooltip = "Last action result or warning. Destructive actions require confirmation and write recovery context first."
+        self.status.tooltip = "Last action result or warning. Injection and purge write backups or recovery context first."
 
     def selected_value(self, widget: Select, fallback: str) -> str:
         return fallback if widget.value is Select.BLANK else str(widget.value)
 
     def set_status(self, message: str) -> None:
         self.status.update(message)
+
+    def selected_status_message(self) -> str:
+        if self.inject_source_context:
+            return (
+                f"Injection source {self.inject_source_context.session_id} armed. "
+                f"Select target {self.selected_session_id or ''} and press i, or return to source and press i to clear."
+            )
+        return f"Selected {self.selected_session_id}. Press v to toggle ID view."
 
     def refresh_rows(self) -> None:
         self.rows = self.controller.refresh(
@@ -225,24 +237,39 @@ class LifeboatTui(App[None]):
     def render_table(self) -> None:
         table = self.table
         table.clear(columns=True)
-        table.add_columns("Pin", "Ready", "Project", "File", "Artifacts", "Size", "Updated", "Title", "Session")
+        if self.show_session_ids:
+            table.add_columns("Pin", "Session ID", "Ready", "File", "Size", "Updated", "Title")
+        else:
+            table.add_columns("Pin", "Ready", "Project", "File", "Artifacts", "Size", "Updated", "Title", "Session")
         pinned = self.controller.pins.load()
         for row in self.rows[:500]:
             sid = str(row.get("id") or "")
             state = self.controller.state_for(row)
             title = row.get("title") or row.get("preview") or ""
-            table.add_row(
-                "*" if self.controller.pin_key(sid) in pinned else "",
-                state.readiness.label,
-                project_label(row, max_chars=24),
-                self.controller.store.file_status(row),
-                state.artifacts.label(),
-                human_size(state.size),
-                iso_from_epoch(row.get("updated_at"))[:19],
-                title.replace("\n", " ")[:80],
-                sid,
-                key=sid,
-            )
+            if self.show_session_ids:
+                table.add_row(
+                    "*" if self.controller.pin_key(sid) in pinned else "",
+                    sid,
+                    state.readiness.label,
+                    self.controller.store.file_status(row),
+                    human_size(state.size),
+                    iso_from_epoch(row.get("updated_at"))[:19],
+                    title.replace("\n", " ")[:80],
+                    key=sid,
+                )
+            else:
+                table.add_row(
+                    "*" if self.controller.pin_key(sid) in pinned else "",
+                    state.readiness.label,
+                    project_label(row, max_chars=24),
+                    self.controller.store.file_status(row),
+                    state.artifacts.label(),
+                    human_size(state.size),
+                    iso_from_epoch(row.get("updated_at"))[:19],
+                    title.replace("\n", " ")[:80],
+                    sid,
+                    key=sid,
+                )
 
     def current_row(self) -> dict | None:
         if not self.rows:
@@ -283,11 +310,13 @@ class LifeboatTui(App[None]):
         self.selected_session_id = str(event.row_key.value)
         self.pending_purge = None
         self.render_details()
+        self.set_status(self.selected_status_message())
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         self.selected_session_id = str(event.row_key.value)
         self.pending_purge = None
         self.render_details()
+        self.set_status(self.selected_status_message())
 
     def on_input_changed(self, _event: Input.Changed) -> None:
         self.pending_purge = None
@@ -297,15 +326,40 @@ class LifeboatTui(App[None]):
         self.search.focus()
 
     def action_clear_search(self) -> None:
+        if self.cancel_pending_action():
+            return
         if self.search.value:
             self.search.value = ""
             self.refresh_rows()
         self.table.focus()
 
+    def cancel_pending_action(self) -> bool:
+        cancelled: list[str] = []
+        if self.inject_source_context:
+            cancelled.append(f"injection source {self.inject_source_context.session_id}")
+            self.inject_source_context = None
+        if self.compare_session_id:
+            cancelled.append(f"compare base {self.compare_session_id}")
+            self.compare_session_id = None
+        if self.pending_purge:
+            cancelled.append(f"purge confirmation {self.pending_purge}")
+            self.pending_purge = None
+        if not cancelled:
+            return False
+        self.set_status("Cancelled " + ", ".join(cancelled) + ".")
+        return True
+
     def action_refresh(self) -> None:
         self.pending_purge = None
         self.refresh_rows()
-        self.set_status("Refreshed session list.")
+        self.set_status(f"Refreshed session list. Showing {len(self.rows)} sessions.")
+
+    def action_toggle_id_view(self) -> None:
+        self.show_session_ids = not self.show_session_ids
+        self.render_table()
+        self.table.focus()
+        mode = "ID-first" if self.show_session_ids else "standard"
+        self.set_status(f"Table view: {mode}. Showing {len(self.rows)} sessions.")
 
     def action_doctor(self) -> None:
         self.pending_purge = None
@@ -360,13 +414,34 @@ class LifeboatTui(App[None]):
         row = self.current_row()
         if not row:
             return
-        result, error = self.controller.inject(row, scrub_profile=self.scrub_profile, target_agent=self.target_agent)
+        target_context, context_error = self.controller.recovery_context(row)
+        if not target_context:
+            self.set_status(context_error or "Selected session cannot be used for injection.")
+            return
+        if not self.inject_source_context:
+            self.inject_source_context = target_context
+            self.set_status(f"Injection source set: {target_context.session_id}. Select target session and press i again.")
+            return
+        if self.inject_source_context.session_id == target_context.session_id:
+            cleared = self.inject_source_context.session_id
+            self.inject_source_context = None
+            self.set_status(f"Injection source cleared: {cleared}.")
+            return
+        result, error = self.controller.inject_into(
+            self.inject_source_context,
+            row,
+            scrub_profile=self.scrub_profile,
+            target_agent=self.target_agent,
+        )
         if error:
             self.set_status(error)
             return
+        source_id = self.inject_source_context.session_id
+        target_id = target_context.session_id
+        self.inject_source_context = None
         self.refresh_rows()
         self.details.update(injection_markdown(result))
-        self.set_status(f"Injected recovery note. Backup: {result.backup_path}")
+        self.set_status(f"Injected {source_id} into {target_id}. Backup: {result.backup_path}")
 
     def action_compare(self) -> None:
         row = self.current_row()

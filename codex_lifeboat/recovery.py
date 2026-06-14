@@ -190,11 +190,54 @@ def inject_handoff_note(
     )
 
 
-def build_injection_payload(context: RecoveryContext, text: str, *, target_agent: str) -> dict[str, Any]:
+def inject_handoff_note_into(
+    config: AppConfig,
+    source_context: RecoveryContext,
+    target_context: RecoveryContext,
+    *,
+    scrub_profile: str = "shareable",
+    target_agent: str = "same",
+    max_chars: int = 8000,
+) -> InjectionResult:
+    summary = write_agent_summary(config, source_context, scrub_profile=scrub_profile)
+    text = summary.path.read_text(encoding="utf-8", errors="replace")
+    if len(text) > max_chars:
+        omitted = len(text) - max_chars
+        text = f"{text[:max_chars]}\n\n[... injection truncated {omitted} characters; full summary: {summary.path} ...]"
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = target_context.session_file_path.with_name(f"{target_context.session_file_path.name}.bak-{stamp}")
+    shutil.copy2(target_context.session_file_path, backup_path)
+    payload = build_injection_payload(
+        target_context,
+        text,
+        target_agent=target_agent,
+        source_context=source_context,
+    )
+    with target_context.session_file_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False))
+        handle.write("\n")
+    return InjectionResult(
+        session_file_path=target_context.session_file_path,
+        backup_path=backup_path,
+        source_path=summary.path,
+        injected_chars=len(text),
+    )
+
+
+def build_injection_payload(
+    context: RecoveryContext,
+    text: str,
+    *,
+    target_agent: str,
+    source_context: RecoveryContext | None = None,
+) -> dict[str, Any]:
     stamp = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    source = source_context or context
     header = (
         "Injected Agent Lifeboat recovery note.\n\n"
-        f"Source agent: {context.agent_key}\n"
+        f"Source agent: {source.agent_key}\n"
+        f"Source session: {source.session_id}\n"
+        f"Target session: {context.session_id}\n"
         f"Target agent: {target_agent_name(context.agent_key, target_agent)}\n\n"
     )
     body = header + text
