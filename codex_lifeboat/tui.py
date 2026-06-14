@@ -153,6 +153,7 @@ class LifeboatTui(App[None]):
 
     def on_mount(self) -> None:
         self.title = "Agent Lifeboat"
+        self.install_tooltips()
         self.refresh_rows()
         self.table.focus()
         self.set_status(
@@ -186,6 +187,23 @@ class LifeboatTui(App[None]):
     @property
     def status(self) -> Static:
         return self.query_one("#status", Static)
+
+    def install_tooltips(self) -> None:
+        self.query_one("#agent").tooltip = "Choose which local agent session store to browse: Codex or Claude Code."
+        self.query_one("#group").tooltip = (
+            "Recent shows newest sessions first. Project groups sessions by cwd/repo. "
+            "Readiness sorts by recovery state such as Ready, Partial, Needs handoff, or Missing."
+        )
+        self.query_one("#target").tooltip = "Choose the agent you plan to resume in. Cross-agent handoffs add target-specific restart notes."
+        self.query_one("#scrub").tooltip = (
+            "Private keeps more recovery detail, Shareable is the normal redacted default, Public trims more aggressively."
+        )
+        self.search.tooltip = "Filter by text, or use agent:, project:, cwd:, model:, status:, file:, and artifact: prefixes."
+        self.table.tooltip = (
+            "Use arrow keys to select a session. Readiness shows whether recovery artifacts exist and whether the transcript is available."
+        )
+        self.details.tooltip = "Selected session details, artifact history, transcript preview, readiness reasons, and available actions."
+        self.status.tooltip = "Last action result or warning. Destructive actions require confirmation and write recovery context first."
 
     def selected_value(self, widget: Select, fallback: str) -> str:
         return fallback if widget.value is Select.BLANK else str(widget.value)
