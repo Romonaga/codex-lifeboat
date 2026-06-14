@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .artifacts import ArtifactHistory
 from .claude import iter_claude_messages
@@ -17,6 +18,7 @@ from .text import (
     content_to_text,
     human_size,
     is_internal_user_message,
+    is_lifeboat_injection,
     iter_jsonl,
 )
 
@@ -31,6 +33,8 @@ class TranscriptPreview:
     message_count: int = 0
     tool_call_count: int = 0
     tool_output_count: int = 0
+    partial: bool = False
+    scanned_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -70,15 +74,35 @@ def project_label(row: dict[str, Any], *, max_chars: int = 36) -> str:
     return name[: max_chars - 3] + "..." if len(name) > max_chars else name
 
 
-def analyze_transcript(agent_key: str, session_file_path: Path | None) -> TranscriptPreview:
+def analyze_transcript(agent_key: str, session_file_path: Path | None, *, max_bytes: int | None = None) -> TranscriptPreview:
     if not session_file_path or not session_file_path.is_file():
         return TranscriptPreview()
+    stat = session_file_path.stat()
+    partial = bool(max_bytes and stat.st_size > max_bytes)
     if agent_key == "claude":
-        return analyze_claude_transcript(session_file_path)
-    return analyze_codex_transcript(session_file_path)
+        return analyze_claude_transcript(session_file_path, max_bytes=max_bytes, partial=partial)
+    return analyze_codex_transcript(session_file_path, max_bytes=max_bytes, partial=partial)
 
 
-def analyze_codex_transcript(path: Path) -> TranscriptPreview:
+def iter_jsonl_tail(path: Path, max_bytes: int) -> Iterable[tuple[int, dict[str, Any], str]]:
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        start = max(0, size - max_bytes)
+        handle.seek(start)
+        if start:
+            handle.readline()
+        for raw in handle:
+            line = raw.decode("utf-8", errors="replace").rstrip("\n")
+            if not line:
+                continue
+            try:
+                yield 0, json.loads(line), line
+            except json.JSONDecodeError:
+                continue
+
+
+def analyze_codex_transcript(path: Path, *, max_bytes: int | None = None, partial: bool = False) -> TranscriptPreview:
     latest_user = ""
     latest_assistant = ""
     commands: list[str] = []
@@ -87,7 +111,15 @@ def analyze_codex_transcript(path: Path) -> TranscriptPreview:
     message_count = 0
     tool_call_count = 0
     tool_output_count = 0
-    for _line_no, obj, _raw in iter_jsonl(path):
+    stat = path.stat()
+    scanned_bytes = stat.st_size
+    rows = iter_jsonl(path)
+    if max_bytes and stat.st_size > max_bytes:
+        rows = iter_jsonl_tail(path, max_bytes)
+        scanned_bytes = max_bytes
+    for _line_no, obj, _raw in rows:
+        if is_lifeboat_injection(obj):
+            continue
         payload = obj.get("payload") if isinstance(obj, dict) else None
         if not isinstance(payload, dict) or obj.get("type") != "response_item":
             continue
@@ -122,10 +154,12 @@ def analyze_codex_transcript(path: Path) -> TranscriptPreview:
         message_count=message_count,
         tool_call_count=tool_call_count,
         tool_output_count=tool_output_count,
+        partial=partial,
+        scanned_bytes=scanned_bytes,
     )
 
 
-def analyze_claude_transcript(path: Path) -> TranscriptPreview:
+def analyze_claude_transcript(path: Path, *, max_bytes: int | None = None, partial: bool = False) -> TranscriptPreview:
     latest_user = ""
     latest_assistant = ""
     commands: list[str] = []
@@ -134,7 +168,14 @@ def analyze_claude_transcript(path: Path) -> TranscriptPreview:
     message_count = 0
     tool_call_count = 0
     tool_output_count = 0
-    for _line_no, role, text, _obj, raw in iter_claude_messages(path):
+    stat = path.stat()
+    scanned_bytes = stat.st_size
+    if max_bytes and stat.st_size > max_bytes:
+        messages = iter_claude_tail_messages(path, max_bytes)
+        scanned_bytes = max_bytes
+    else:
+        messages = iter_claude_messages(path)
+    for _line_no, role, text, _obj, raw in messages:
         if not text.strip():
             continue
         cleaned = clean_text(text, max_chars=1200, do_redact=True)
@@ -161,7 +202,27 @@ def analyze_claude_transcript(path: Path) -> TranscriptPreview:
         message_count=message_count,
         tool_call_count=tool_call_count,
         tool_output_count=tool_output_count,
+        partial=partial,
+        scanned_bytes=scanned_bytes,
     )
+
+
+def iter_claude_tail_messages(path: Path, max_bytes: int):
+    from .claude import claude_content_to_text, is_claude_internal_text
+
+    for line_no, obj, raw in iter_jsonl_tail(path, max_bytes):
+        if obj.get("isMeta") or obj.get("type") in {"file-history-snapshot", "progress", "system"}:
+            continue
+        message = obj.get("message")
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or obj.get("type") or "unknown")
+        text = claude_content_to_text(message.get("content"))
+        if is_lifeboat_injection(obj, text):
+            continue
+        if role == "user" and is_claude_internal_text(text):
+            continue
+        yield line_no, role, text, obj, raw
 
 
 def recovery_readiness(

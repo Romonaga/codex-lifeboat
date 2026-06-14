@@ -37,6 +37,7 @@ def session_details_markdown(detail: SessionDetail, *, store_display_name: str) 
 - **Model:** `{row.get("model") or ""}`
 - **Tokens used:** `{tokens:,}`
 - **Session file:** `{row.get("session_file_path") or row.get("rollout_path") or ""}`
+- **Preview scan:** `{preview_scan_label(preview)}`
 
 ## Recoverable
 
@@ -100,8 +101,18 @@ def session_details_markdown(detail: SessionDetail, *, store_display_name: str) 
 - `p` toggle pin
 - `x` dry-run purge
 - `ctrl+x` purge after two-step confirmation
+- `u` preview latest backup restore
+- `ctrl+u` restore latest backup after preview
 - `d` show doctor report
 """
+
+
+def preview_scan_label(preview: Any) -> str:
+    if preview.partial:
+        return f"tail preview, scanned {human_size(preview.scanned_bytes)}"
+    if preview.scanned_bytes:
+        return f"full preview, scanned {human_size(preview.scanned_bytes)}"
+    return "not available"
 
 
 def compare_markdown(left: dict[str, Any], right: dict[str, Any], *, left_state: Any, right_state: Any) -> str:
@@ -154,3 +165,30 @@ def purge_preview_markdown(lines: list[str]) -> str:
 
 def purge_complete_markdown(handoff_path: Any, lines: list[str]) -> str:
     return "# Purge Complete\n\n" f"- Recovery handoff: `{handoff_path}`\n" + "\n".join(f"- {line}" for line in lines)
+
+
+def restore_preview_markdown(session_file: Any, backups: list[Any]) -> str:
+    if not backups:
+        return "# Restore Backup\n\nNo backups found for this session."
+    latest = backups[0]
+    body = (
+        "# Restore Backup\n\n"
+        "The latest backup will be restored if you press `ctrl+u` again.\n\n"
+        f"- Session file: `{session_file}`\n"
+        f"- Latest backup: `{latest.path}`\n"
+        f"- Backup size: `{human_size(latest.size)}`\n"
+        f"- Backup timestamp: `{iso_from_epoch(latest.updated_at)}`\n\n"
+        "## Available Backups\n\n"
+    )
+    lines = [f"- `{backup.path}` `{human_size(backup.size)}` `{iso_from_epoch(backup.updated_at)}`" for backup in backups[:10]]
+    return body + "\n".join(lines)
+
+
+def restore_complete_markdown(result: Any) -> str:
+    return (
+        "# Restore Complete\n\n"
+        f"- Restored session file: `{result.session_file_path}`\n"
+        f"- Restored from backup: `{result.backup_path}`\n"
+        f"- Previous current file saved as: `{result.replaced_backup_path}`\n"
+        f"- Restored bytes: `{human_size(result.restored_bytes)}`\n"
+    )

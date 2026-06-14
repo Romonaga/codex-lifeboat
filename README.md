@@ -127,11 +127,15 @@ b        show bulk cleanup plan
 p        toggle pin
 x        dry-run purge
 ctrl+x   purge after two-step confirmation
+u        preview latest backup restore
+ctrl+u   restore latest backup after preview
 d        doctor report
-Esc      cancel pending injection, compare, purge confirmation, or clear search
+Esc      cancel pending injection, compare, purge/restore confirmation, or clear search
 ```
 
 Injection is intentionally conservative. Press `i` on the source session, move to a different target session, then press `i` again. Lifeboat writes a compact recovery summary from the source, backs up the target JSONL beside the original file, and appends a clearly marked synthetic user message to the target. If an agent changes its session format, restore from the backup.
+
+Restore is also guarded. Press `u` on a session to preview the newest `.bak-*` file Lifeboat can find beside that session file, then press `ctrl+u` to restore it. Lifeboat saves the current session file as `.pre-restore-*` before replacing it.
 
 Full handoffs start with a `Continuation Snapshot` before the chronological transcript. That front-loads the latest user requests, assistant results, commands, paths, and blockers without internal tool trace details, so a new session can recover current state even if a reader or tool only shows the beginning of the file.
 

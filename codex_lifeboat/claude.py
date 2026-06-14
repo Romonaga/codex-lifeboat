@@ -8,7 +8,7 @@ from typing import Any
 
 from .config import AppConfig
 from .sessions import iso_from_epoch
-from .text import clean_text, content_to_text, is_internal_user_message
+from .text import clean_text, content_to_text, is_internal_user_message, is_lifeboat_injection
 
 UUID_RE = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", re.I)
 
@@ -93,6 +93,8 @@ def iter_claude_messages(path: Path):
             continue
         role = str(message.get("role") or obj.get("type") or "unknown")
         text = claude_content_to_text(message.get("content"))
+        if is_lifeboat_injection(obj, text):
+            continue
         if role == "user" and is_claude_internal_text(text):
             continue
         yield line_no, role, text, obj, raw

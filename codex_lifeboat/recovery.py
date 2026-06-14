@@ -42,6 +42,21 @@ class InjectionResult:
     injected_chars: int
 
 
+@dataclass(frozen=True)
+class BackupInfo:
+    path: Path
+    size: int
+    updated_at: float
+
+
+@dataclass(frozen=True)
+class RestoreResult:
+    session_file_path: Path
+    backup_path: Path
+    replaced_backup_path: Path
+    restored_bytes: int
+
+
 def options_for_profile(profile: str) -> HandoffOptions:
     if profile == "private":
         return HandoffOptions(redact=True, include_tools=True, tool_chars=6000)
@@ -284,3 +299,32 @@ def bulk_cleanup_plan(rows: list[dict[str, Any]], row_states: dict[str, dict[str
         else:
             lines.append(f"{sid} | needs handoff | generate handoff first | {title}")
     return lines
+
+
+def list_session_backups(session_file_path: Path) -> list[BackupInfo]:
+    backups: list[BackupInfo] = []
+    for path in session_file_path.parent.glob(f"{session_file_path.name}.bak-*"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        backups.append(BackupInfo(path=path, size=stat.st_size, updated_at=stat.st_mtime))
+    backups.sort(key=lambda backup: backup.updated_at, reverse=True)
+    return backups
+
+
+def restore_session_backup(session_file_path: Path, backup_path: Path) -> RestoreResult:
+    if not session_file_path.exists():
+        raise FileNotFoundError(session_file_path)
+    if not backup_path.exists():
+        raise FileNotFoundError(backup_path)
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    replaced_backup_path = session_file_path.with_name(f"{session_file_path.name}.pre-restore-{stamp}")
+    shutil.copy2(session_file_path, replaced_backup_path)
+    shutil.copy2(backup_path, session_file_path)
+    return RestoreResult(
+        session_file_path=session_file_path,
+        backup_path=backup_path,
+        replaced_backup_path=replaced_backup_path,
+        restored_bytes=session_file_path.stat().st_size,
+    )

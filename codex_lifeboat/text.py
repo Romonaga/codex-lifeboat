@@ -97,6 +97,17 @@ def is_internal_user_message(text: str) -> bool:
     return any(marker in text for marker in ("<environment_context>", "<turn_aborted>"))
 
 
+def is_lifeboat_injection(obj: dict[str, Any] | None, text: str = "") -> bool:
+    if not isinstance(obj, dict):
+        return text.lstrip().startswith("Injected Agent Lifeboat recovery note.")
+    if obj.get("agent_lifeboat_injection"):
+        return True
+    payload = obj.get("payload")
+    if isinstance(payload, dict) and payload.get("agent_lifeboat_injection"):
+        return True
+    return text.lstrip().startswith("Injected Agent Lifeboat recovery note.")
+
+
 def add_unique(items: list[str], value: str, *, limit: int, max_chars: int = 600) -> None:
     value = clean_text(value, max_chars=max_chars, do_redact=True).strip()
     if not value or value in items:

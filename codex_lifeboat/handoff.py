@@ -20,6 +20,7 @@ from .text import (
     format_block,
     human_size,
     is_internal_user_message,
+    is_lifeboat_injection,
     iter_jsonl,
 )
 
@@ -88,6 +89,8 @@ def collect_continuation_snapshot(*, rollout_path: Path, message_chars: int, do_
     blockers: list[str] = []
 
     for _line_no, obj, _raw in iter_jsonl(rollout_path):
+        if is_lifeboat_injection(obj):
+            continue
         payload = obj.get("payload") if isinstance(obj, dict) else None
         if not isinstance(payload, dict) or obj.get("type") != "response_item":
             continue
@@ -168,6 +171,8 @@ def write_handoff(
         out.write("## Conversation\n\n")
 
         for line_no, obj, raw in iter_jsonl(rollout_path):
+            if is_lifeboat_injection(obj):
+                continue
             if options.raw_tail:
                 tail_lines.append(raw)
                 if len(tail_lines) > options.raw_tail:
@@ -267,6 +272,8 @@ def write_summary(
     counts = {"messages": 0, "tool_calls": 0, "tool_outputs": 0}
 
     for line_no, obj, _raw in iter_jsonl(rollout_path):
+        if is_lifeboat_injection(obj):
+            continue
         payload = obj.get("payload") if isinstance(obj, dict) else None
         if not isinstance(payload, dict) or obj.get("type") != "response_item":
             continue

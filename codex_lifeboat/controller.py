@@ -19,15 +19,21 @@ from .intelligence import (
 from .operations import archive_session, purge_session
 from .pins import PinStore
 from .recovery import (
+    BackupInfo,
     InjectionResult,
     RecoveryContext,
+    RestoreResult,
     bulk_cleanup_plan,
     inject_handoff_note,
     inject_handoff_note_into,
+    list_session_backups,
+    restore_session_backup,
     write_agent_handoff,
     write_agent_summary,
     write_resume_package,
 )
+
+DETAIL_PREVIEW_BYTES = 2 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -51,6 +57,7 @@ class LifeboatController:
         self.pins = PinStore(self.config)
         self.rows: list[dict[str, Any]] = []
         self.row_states: dict[str, dict[str, Any]] = {}
+        self.preview_cache: dict[tuple[str, str, int, int], TranscriptPreview] = {}
 
     def agent_label(self, key: str) -> str:
         for choice in self.agent_choices:
@@ -64,6 +71,7 @@ class LifeboatController:
         self.store = build_store(self.config, self.agent_key)
         self.rows = []
         self.row_states = {}
+        self.preview_cache = {}
 
     def pin_key(self, session_id: str) -> str:
         return f"{self.agent_key}:{session_id}"
@@ -153,13 +161,27 @@ class LifeboatController:
                 "size": self.state_for(row).size,
                 "project": self.state_for(row).project,
             },
-            preview=analyze_transcript(self.agent_key, path),
+            preview=self.preview_for(path),
             pinned=self.pin_key(str(row.get("id") or "")) in self.pins.load(),
             file_status=self.store.file_status(row),
             has_session_file=has_file,
             transcript_state=transcript_state,
             action_state=action_state,
         )
+
+    def preview_for(self, path: Path | None) -> TranscriptPreview:
+        if not path or not path.is_file():
+            return TranscriptPreview()
+        stat = path.stat()
+        key = (self.agent_key, str(path), stat.st_mtime_ns, stat.st_size)
+        cached = self.preview_cache.get(key)
+        if cached:
+            return cached
+        preview = analyze_transcript(self.agent_key, path, max_bytes=DETAIL_PREVIEW_BYTES)
+        self.preview_cache[key] = preview
+        if len(self.preview_cache) > 128:
+            self.preview_cache.pop(next(iter(self.preview_cache)))
+        return preview
 
     def recovery_context(self, row: dict[str, Any]) -> tuple[RecoveryContext | None, str | None]:
         session_id = str(row.get("id") or "")
@@ -268,6 +290,26 @@ class LifeboatController:
 
     def bulk_plan(self, rows: list[dict[str, Any]]) -> list[str]:
         return bulk_cleanup_plan(rows, self.row_states)
+
+    def backups_for(self, row: dict[str, Any]) -> tuple[list[BackupInfo], str | None]:
+        context, error = self.recovery_context(row)
+        if not context:
+            return [], error
+        return list_session_backups(context.session_file_path), None
+
+    def restore_latest_backup(self, row: dict[str, Any]) -> tuple[RestoreResult | None, str | None]:
+        context, error = self.recovery_context(row)
+        if not context:
+            return None, error
+        backups = list_session_backups(context.session_file_path)
+        if not backups:
+            return None, "No backups were found for the selected session."
+        try:
+            result = restore_session_backup(context.session_file_path, backups[0].path)
+        except OSError as exc:
+            return None, f"Restore failed: {exc}"
+        self.preview_cache = {}
+        return result, None
 
 
 @dataclass(frozen=True)

@@ -17,6 +17,8 @@ from codex_lifeboat.views import (
     injection_markdown,
     purge_complete_markdown,
     purge_preview_markdown,
+    restore_complete_markdown,
+    restore_preview_markdown,
     session_details_markdown,
 )
 
@@ -102,6 +104,8 @@ class LifeboatTui(App[None]):
         Binding("d", "doctor", "Doctor"),
         Binding("x", "purge_preview", "Dry purge"),
         Binding("ctrl+x", "purge_confirm", "Purge"),
+        Binding("u", "restore_preview", "Restore"),
+        Binding("ctrl+u", "restore_confirm", "Do restore"),
     ]
 
     def __init__(self) -> None:
@@ -111,6 +115,7 @@ class LifeboatTui(App[None]):
         self.selected_session_id: str | None = None
         self.compare_session_id: str | None = None
         self.pending_purge: str | None = None
+        self.pending_restore: str | None = None
         self.show_session_ids = False
         self.inject_source_context: RecoveryContext | None = None
 
@@ -294,6 +299,7 @@ class LifeboatTui(App[None]):
             self.selected_session_id = None
             self.compare_session_id = None
             self.pending_purge = None
+            self.pending_restore = None
             self.refresh_rows()
             self.table.focus()
             self.set_status(f"Switched to {self.controller.store.display_name}.")
@@ -309,12 +315,14 @@ class LifeboatTui(App[None]):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         self.selected_session_id = str(event.row_key.value)
         self.pending_purge = None
+        self.pending_restore = None
         self.render_details()
         self.set_status(self.selected_status_message())
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         self.selected_session_id = str(event.row_key.value)
         self.pending_purge = None
+        self.pending_restore = None
         self.render_details()
         self.set_status(self.selected_status_message())
 
@@ -344,6 +352,9 @@ class LifeboatTui(App[None]):
         if self.pending_purge:
             cancelled.append(f"purge confirmation {self.pending_purge}")
             self.pending_purge = None
+        if self.pending_restore:
+            cancelled.append(f"restore confirmation {self.pending_restore}")
+            self.pending_restore = None
         if not cancelled:
             return False
         self.set_status("Cancelled " + ", ".join(cancelled) + ".")
@@ -351,6 +362,7 @@ class LifeboatTui(App[None]):
 
     def action_refresh(self) -> None:
         self.pending_purge = None
+        self.pending_restore = None
         self.refresh_rows()
         self.set_status(f"Refreshed session list. Showing {len(self.rows)} sessions.")
 
@@ -511,6 +523,42 @@ class LifeboatTui(App[None]):
         self.refresh_rows()
         self.details.update(purge_complete_markdown(handoff.path, lines or []))
         self.set_status(f"Purged {session_id}. Recovery handoff written first.")
+
+    def action_restore_preview(self) -> None:
+        row = self.current_row()
+        if not row:
+            return
+        context, context_error = self.controller.recovery_context(row)
+        if not context:
+            self.set_status(context_error or "Selected session cannot be restored.")
+            return
+        backups, error = self.controller.backups_for(row)
+        if error:
+            self.set_status(error)
+            return
+        self.pending_restore = context.session_id if backups else None
+        self.details.update(restore_preview_markdown(context.session_file_path, backups))
+        if backups:
+            self.set_status(f"Restore preview loaded for {context.session_id}. Press ctrl+u to restore latest backup.")
+        else:
+            self.set_status(f"No backups found for {context.session_id}.")
+
+    def action_restore_confirm(self) -> None:
+        row = self.current_row()
+        if not row:
+            return
+        session_id = str(row.get("id") or "")
+        if self.pending_restore != session_id:
+            self.action_restore_preview()
+            return
+        result, error = self.controller.restore_latest_backup(row)
+        if error:
+            self.set_status(error)
+            return
+        self.pending_restore = None
+        self.refresh_rows()
+        self.details.update(restore_complete_markdown(result))
+        self.set_status(f"Restored {session_id} from {result.backup_path}.")
 
     @property
     def scrub_profile(self) -> str:
