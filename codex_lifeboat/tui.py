@@ -445,7 +445,7 @@ class LifeboatTui(App[None]):
         if error:
             self.set_status(error)
             return
-        message = f"Opened Tilix in {result.cwd} and started: {result.command_text()}"
+        message = f"Opened {result.terminal_name} in {result.cwd} and started: {result.command_text()}"
         if result.warning:
             message = f"{message}. {result.warning}"
         self.set_status(message)

@@ -16,7 +16,7 @@ It currently supports Codex and Claude Code sessions. It helps you browse sessio
 - Full Markdown handoff for pasting into a fresh AI session.
 - Compact recovery summary focused on goals, paths, commands, blockers, and recent context.
 - Resume package export with handoff, summary, archive, and metadata.
-- One-key resume launcher that opens Tilix in the session cwd and starts Codex or Claude resume.
+- One-key resume launcher that opens a terminal in the session cwd and starts Codex or Claude resume.
 - Target-agent handoff notes for Codex-to-Codex, Codex-to-Claude, Claude-to-Claude, and Claude-to-Codex recovery.
 - Scrub profiles for private, shareable, and public recovery artifacts.
 - Guarded handoff injection that copies one session's compact recovery note into another session file only after creating a backup.
@@ -114,7 +114,7 @@ Run the program:
 agent-lifeboat
 ```
 
-The terminal app provides a bordered session explorer, an agent selector, project/readiness grouping, filtered search, pinned-session state, readiness status, artifact history, full handoff generation, compact summary generation, archive, resume export, direct Tilix resume launching, guarded injection, guarded purge, and the doctor report.
+The terminal app provides a bordered session explorer, an agent selector, project/readiness grouping, filtered search, pinned-session state, readiness status, artifact history, full handoff generation, compact summary generation, archive, resume export, direct terminal resume launching, guarded injection, guarded purge, and the doctor report.
 
 Common keys:
 
@@ -124,7 +124,7 @@ s        write compact summary
 a        archive session file
 e        export resume package
 y        copy selected session id to clipboard
-o        open Tilix in the session cwd and resume the selected agent session
+o        open a terminal in the session cwd and resume the selected agent session
 i        set injection source, then inject into a different selected session after backup
 c        compare two sessions
 b        show bulk cleanup plan
@@ -138,6 +138,8 @@ Esc      cancel pending injection, compare, purge/restore confirmation, or clear
 ```
 
 Injection is intentionally conservative. Press `i` on the source session, move to a different target session, then press `i` again. Lifeboat writes a compact recovery summary from the source, backs up the target JSONL beside the original file, and appends a clearly marked synthetic user message to the target. If an agent changes its session format, restore from the backup.
+
+Resume launching tries `tilix` first, then falls back through `gnome-terminal`, `konsole`, `xfce4-terminal`, `kitty`, `alacritty`, and `xterm`.
 
 Restore is also guarded. Press `u` on a session to preview the newest `.bak-*` file Lifeboat can find beside that session file, then press `ctrl+u` to restore it. Lifeboat saves the current session file as `.pre-restore-*` before replacing it.
 
