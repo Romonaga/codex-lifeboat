@@ -121,6 +121,7 @@ h        write full handoff
 s        write compact summary
 a        archive session file
 e        export resume package
+y        copy selected session id to clipboard
 i        set injection source, then inject into a different selected session after backup
 c        compare two sessions
 b        show bulk cleanup plan

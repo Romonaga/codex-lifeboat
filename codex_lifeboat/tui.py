@@ -97,6 +97,7 @@ class LifeboatTui(App[None]):
         Binding("s", "summary", "Summary"),
         Binding("a", "archive", "Archive"),
         Binding("e", "export_resume", "Export"),
+        Binding("y", "copy_session_id", "Copy ID"),
         Binding("i", "inject_handoff", "Inject"),
         Binding("c", "compare", "Compare"),
         Binding("b", "bulk_cleanup", "Bulk plan"),
@@ -421,6 +422,18 @@ class LifeboatTui(App[None]):
             return
         self.refresh_rows()
         self.set_status(f"Exported resume package: {package_path}")
+
+    def action_copy_session_id(self) -> None:
+        row = self.current_row()
+        if not row:
+            self.set_status("No session selected.")
+            return
+        session_id = str(row.get("id") or "")
+        if not session_id:
+            self.set_status("Selected session has no session id.")
+            return
+        self.copy_to_clipboard(session_id)
+        self.set_status(f"Copied session id to clipboard: {session_id}")
 
     def action_inject_handoff(self) -> None:
         row = self.current_row()
