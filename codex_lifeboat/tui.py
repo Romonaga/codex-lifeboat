@@ -16,8 +16,11 @@ from codex_lifeboat.intelligence import project_key, project_label
 from codex_lifeboat.recovery import RecoveryContext
 from codex_lifeboat.sessions import iso_from_epoch
 from codex_lifeboat.text import human_size
+from codex_lifeboat.ui_state import LifeboatUiState
 from codex_lifeboat.views import (
     bulk_cleanup_markdown,
+    bulk_purge_complete_markdown,
+    bulk_purge_preview_markdown,
     compare_markdown,
     doctor_fixes_markdown,
     health_markdown,
@@ -855,6 +858,7 @@ class LifeboatTui(App[None]):
         Binding("f", "doctor_fixes", "Fix"),
         Binding("x", "purge_preview", "Dry purge"),
         Binding("ctrl+x", "purge_confirm", "Purge"),
+        Binding("ctrl+z", "bulk_purge", "Purge all"),
         Binding("u", "restore_preview", "Restore"),
         Binding("ctrl+u", "restore_confirm", "Do restore"),
     ]
@@ -863,14 +867,7 @@ class LifeboatTui(App[None]):
         super().__init__()
         self.controller = LifeboatController()
         self.rows: list[dict] = []
-        self.selected_session_id: str | None = None
-        self.compare_session_id: str | None = None
-        self.pending_purge: str | None = None
-        self.pending_restore: str | None = None
-        self.show_session_ids = False
-        self.inject_source_context: RecoveryContext | None = None
-        self.sort_column: str | None = None
-        self.sort_descending = False
+        self.ui_state = LifeboatUiState()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -954,6 +951,42 @@ class LifeboatTui(App[None]):
     def status(self) -> Static:
         return self.query_one("#status", Static)
 
+    @property
+    def selected_session_id(self) -> str | None:
+        return self.ui_state.selected_session_id
+
+    @property
+    def compare_session_id(self) -> str | None:
+        return self.ui_state.compare_session_id
+
+    @property
+    def pending_purge(self) -> str | None:
+        return self.ui_state.pending_purge
+
+    @property
+    def pending_restore(self) -> str | None:
+        return self.ui_state.pending_restore
+
+    @property
+    def show_session_ids(self) -> bool:
+        return self.ui_state.show_session_ids
+
+    @property
+    def inject_source_context(self) -> RecoveryContext | None:
+        return self.ui_state.inject_source_context
+
+    @property
+    def sort_column(self) -> str | None:
+        return self.ui_state.sort_column
+
+    @property
+    def sort_descending(self) -> bool:
+        return self.ui_state.sort_descending
+
+    @property
+    def restoring_table_cursor(self) -> bool:
+        return self.ui_state.restoring_table_cursor
+
     def install_tooltips(self) -> None:
         self.query_one("#agent").tooltip = "Choose which local agent session store to browse: Codex or Claude Code."
         self.query_one("#group").tooltip = (
@@ -985,7 +1018,7 @@ class LifeboatTui(App[None]):
 
     def handle_context_action(self, action: str | None) -> None:
         if not action:
-            self.table.focus()
+            self.restore_table_selection()
             return
         handlers = {
             "launch_resume": self.action_launch_resume,
@@ -1016,7 +1049,7 @@ class LifeboatTui(App[None]):
         handler = handlers.get(action)
         if handler:
             handler()
-        self.table.focus()
+        self.restore_table_selection()
 
     def selected_value(self, widget: Select, fallback: str) -> str:
         return fallback if widget.value is Select.BLANK else str(widget.value)
@@ -1039,8 +1072,9 @@ class LifeboatTui(App[None]):
         )
         visible_ids = {str(row.get("id") or "") for row in self.rows[:500]}
         if self.selected_session_id not in visible_ids:
-            self.selected_session_id = str(self.rows[0].get("id") or "") if self.rows else None
+            self.ui_state.select_session(str(self.rows[0].get("id") or "") if self.rows else None)
         self.render_table()
+        self.restore_table_selection()
         self.render_details()
 
     def render_table(self) -> None:
@@ -1076,6 +1110,23 @@ class LifeboatTui(App[None]):
                     sid,
                     key=sid,
                 )
+
+    def restore_table_selection(self) -> None:
+        table = self.table
+        if not self.selected_session_id or not table.row_count:
+            table.focus()
+            return
+        try:
+            row_index = table.get_row_index(self.selected_session_id)
+        except Exception:
+            table.focus()
+            return
+        self.ui_state.begin_table_restore()
+        try:
+            table.move_cursor(row=row_index, column=0, animate=False, scroll=True)
+        finally:
+            self.ui_state.end_table_restore()
+        table.focus()
 
     def table_columns(self) -> tuple[str, ...]:
         return ID_COLUMNS if self.show_session_ids else STANDARD_COLUMNS
@@ -1128,13 +1179,9 @@ class LifeboatTui(App[None]):
         if event.column_index < 0 or event.column_index >= len(columns):
             return
         column = columns[event.column_index]
-        if column == self.sort_column:
-            self.sort_descending = not self.sort_descending
-        else:
-            self.sort_column = column
-            self.sort_descending = column in DEFAULT_DESCENDING_SORTS
+        self.ui_state.apply_sort(column, default_descending=column in DEFAULT_DESCENDING_SORTS)
         self.render_table()
-        self.table.focus()
+        self.restore_table_selection()
         direction = "descending" if self.sort_descending else "ascending"
         self.set_status(f"Sorted by {COLUMN_LABELS[column]} ({direction}).")
 
@@ -1158,12 +1205,8 @@ class LifeboatTui(App[None]):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "agent":
             self.controller.switch_agent(str(event.value))
-            self.selected_session_id = None
-            self.compare_session_id = None
-            self.pending_purge = None
-            self.pending_restore = None
+            self.ui_state.reset_for_agent_switch()
             self.refresh_rows()
-            self.table.focus()
             self.set_status(f"Switched to {self.controller.store.display_name}.")
             return
         if event.select.id == "group":
@@ -1175,21 +1218,19 @@ class LifeboatTui(App[None]):
             self.set_status("Recovery options updated.")
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        self.selected_session_id = str(event.row_key.value)
-        self.pending_purge = None
-        self.pending_restore = None
+        if self.restoring_table_cursor:
+            return
+        self.ui_state.select_session(str(event.row_key.value))
         self.render_details()
         self.set_status(self.selected_status_message())
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        self.selected_session_id = str(event.row_key.value)
-        self.pending_purge = None
-        self.pending_restore = None
+        self.ui_state.select_session(str(event.row_key.value))
         self.render_details()
         self.open_context_menu()
 
     def on_input_changed(self, _event: Input.Changed) -> None:
-        self.pending_purge = None
+        self.ui_state.clear_restore_and_purge()
         self.refresh_rows()
 
     def action_focus_search(self) -> None:
@@ -1201,42 +1242,29 @@ class LifeboatTui(App[None]):
         if self.search.value:
             self.search.value = ""
             self.refresh_rows()
-        self.table.focus()
+        self.restore_table_selection()
 
     def cancel_pending_action(self) -> bool:
-        cancelled: list[str] = []
-        if self.inject_source_context:
-            cancelled.append(f"injection source {self.inject_source_context.session_id}")
-            self.inject_source_context = None
-        if self.compare_session_id:
-            cancelled.append(f"compare base {self.compare_session_id}")
-            self.compare_session_id = None
-        if self.pending_purge:
-            cancelled.append(f"purge confirmation {self.pending_purge}")
-            self.pending_purge = None
-        if self.pending_restore:
-            cancelled.append(f"restore confirmation {self.pending_restore}")
-            self.pending_restore = None
+        cancelled = self.ui_state.cancel_pending_actions()
         if not cancelled:
             return False
         self.set_status("Cancelled " + ", ".join(cancelled) + ".")
         return True
 
     def action_refresh(self) -> None:
-        self.pending_purge = None
-        self.pending_restore = None
+        self.ui_state.clear_restore_and_purge()
         self.refresh_rows()
         self.set_status(f"Refreshed session list. Showing {len(self.rows)} sessions.")
 
     def action_toggle_id_view(self) -> None:
-        self.show_session_ids = not self.show_session_ids
+        self.ui_state.toggle_id_view()
         self.render_table()
-        self.table.focus()
+        self.restore_table_selection()
         mode = "ID-first" if self.show_session_ids else "standard"
         self.set_status(f"Table view: {mode}. Showing {len(self.rows)} sessions.")
 
     def action_doctor(self) -> None:
-        self.pending_purge = None
+        self.ui_state.clear_restore_and_purge()
         self.details.update(doctor_report(self.controller.config, self.controller.store, self.controller.pins, agent_key=self.controller.agent_key))
         self.set_status("Doctor report loaded.")
 
@@ -1291,7 +1319,7 @@ class LifeboatTui(App[None]):
         self.push_screen(CombinedHandoffPicker(self.rows, self.selected_session_id), self.handle_combined_handoff_selection)
 
     def handle_combined_handoff_selection(self, session_ids: tuple[str, ...] | None) -> None:
-        self.table.focus()
+        self.restore_table_selection()
         if not session_ids:
             self.set_status("Combined handoff cancelled.")
             return
@@ -1375,7 +1403,7 @@ class LifeboatTui(App[None]):
         self.push_screen(NoteEditor(session_id, note.text if note else ""), self.handle_note_result)
 
     def handle_note_result(self, result: tuple[str, str] | None) -> None:
-        self.table.focus()
+        self.restore_table_selection()
         row = self.current_row()
         if not row:
             return
@@ -1414,7 +1442,7 @@ class LifeboatTui(App[None]):
         self.push_screen(BackupPicker(str(row.get("id") or ""), backups), self.handle_backup_selection)
 
     def handle_backup_selection(self, backup_path: str | None) -> None:
-        self.table.focus()
+        self.restore_table_selection()
         row = self.current_row()
         if not row:
             return
@@ -1426,7 +1454,7 @@ class LifeboatTui(App[None]):
         if error:
             self.set_status(error)
             return
-        self.pending_restore = None
+        self.ui_state.clear_pending_restore()
         self.refresh_rows()
         self.details.update(restore_complete_markdown(result))
         self.set_status(f"Restored {session_id} from {result.backup_path}.")
@@ -1453,7 +1481,7 @@ class LifeboatTui(App[None]):
         self.push_screen(InjectionPicker(self.rows, self.selected_session_id), self.handle_injection_selection)
 
     def handle_injection_selection(self, selection: tuple[tuple[str, ...], str] | None) -> None:
-        self.table.focus()
+        self.restore_table_selection()
         if not selection:
             self.set_status("Injection cancelled.")
             return
@@ -1479,7 +1507,7 @@ class LifeboatTui(App[None]):
         if error:
             self.set_status(error)
             return
-        self.selected_session_id = target_id
+        self.ui_state.restore_selected_session(target_id)
         self.refresh_rows()
         self.details.update(injection_markdown(result))
         source_label = source_ids[0] if len(source_ids) == 1 else f"{len(source_ids)} sessions"
@@ -1491,16 +1519,16 @@ class LifeboatTui(App[None]):
             return
         sid = str(row.get("id") or "")
         if not self.compare_session_id:
-            self.compare_session_id = sid
+            self.ui_state.set_compare_base(sid)
             self.set_status(f"Compare base set to {sid}. Move to another session and press c again.")
             return
         if self.compare_session_id == sid:
-            self.compare_session_id = None
+            self.ui_state.clear_compare()
             self.set_status("Compare selection cleared.")
             return
         left = next((candidate for candidate in self.rows if str(candidate.get("id") or "") == self.compare_session_id), None)
         if not left:
-            self.compare_session_id = sid
+            self.ui_state.set_compare_base(sid)
             self.set_status(f"Previous compare base is no longer visible. Compare base set to {sid}.")
             return
         self.details.update(
@@ -1545,18 +1573,49 @@ class LifeboatTui(App[None]):
         if not row:
             return
         session_id = str(row.get("id") or "")
-        if self.pending_purge != session_id:
-            self.pending_purge = session_id
+        if not self.ui_state.arm_purge(session_id):
             self.set_status(f"Press ctrl+x again to purge {session_id}. A recovery handoff will be written first.")
             return
         handoff, lines, error = self.controller.purge_after_handoff(row, scrub_profile=self.scrub_profile, target_agent=self.target_agent)
         if error:
             self.set_status(error)
             return
-        self.pending_purge = None
+        self.ui_state.complete_purge()
         self.refresh_rows()
-        self.details.update(purge_complete_markdown(handoff.path, lines or []))
-        self.set_status(f"Purged {session_id}. Recovery handoff written first.")
+        handoff_path = handoff.path if handoff else None
+        self.details.update(purge_complete_markdown(handoff_path, lines or []))
+        if handoff:
+            self.set_status(f"Purged {session_id}. Recovery handoff written first.")
+        else:
+            self.set_status(f"Purged stale metadata for {session_id}. No session file was available for handoff.")
+
+    def action_bulk_purge(self) -> None:
+        rows = self.rows[:500]
+        fingerprint = self.controller.bulk_purge_fingerprint(rows)
+        preview = self.controller.bulk_purge_preview(rows)
+        if not fingerprint or preview.candidate_count == 0:
+            self.details.update(bulk_purge_preview_markdown(preview))
+            self.set_status("No unpinned visible sessions are eligible for bulk purge.")
+            return
+        if not self.ui_state.arm_bulk_purge(fingerprint):
+            self.details.update(bulk_purge_preview_markdown(preview))
+            self.set_status(
+                f"Press ctrl+z again to purge {preview.candidate_count} unpinned visible sessions. "
+                f"Skipped pinned: {preview.pinned_skipped}."
+            )
+            return
+        result = self.controller.bulk_purge_after_handoff(
+            rows,
+            scrub_profile=self.scrub_profile,
+            target_agent=self.target_agent,
+        )
+        self.ui_state.complete_bulk_purge()
+        self.refresh_rows()
+        self.details.update(bulk_purge_complete_markdown(result))
+        if result.errors:
+            self.set_status(f"Bulk purge finished with {len(result.errors)} errors. Purged {result.purged_count} sessions.")
+        else:
+            self.set_status(f"Bulk purged {result.purged_count} sessions. Skipped pinned: {result.pinned_skipped}.")
 
     def action_restore_preview(self) -> None:
         row = self.current_row()
@@ -1570,7 +1629,7 @@ class LifeboatTui(App[None]):
         if error:
             self.set_status(error)
             return
-        self.pending_restore = context.session_id if backups else None
+        self.ui_state.arm_restore(context.session_id if backups else None)
         self.details.update(restore_preview_markdown(context.session_file_path, backups))
         if backups:
             self.set_status(f"Restore preview loaded for {context.session_id}. Press ctrl+u to restore latest backup.")
@@ -1582,14 +1641,14 @@ class LifeboatTui(App[None]):
         if not row:
             return
         session_id = str(row.get("id") or "")
-        if self.pending_restore != session_id:
+        if not self.ui_state.restore_is_armed(session_id):
             self.action_restore_preview()
             return
         result, error = self.controller.restore_latest_backup(row)
         if error:
             self.set_status(error)
             return
-        self.pending_restore = None
+        self.ui_state.clear_pending_restore()
         self.refresh_rows()
         self.details.update(restore_complete_markdown(result))
         self.set_status(f"Restored {session_id} from {result.backup_path}.")

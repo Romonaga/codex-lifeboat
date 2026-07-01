@@ -59,6 +59,17 @@ class SessionDetail:
     backup_count: int
 
 
+@dataclass(frozen=True)
+class BulkPurgeResult:
+    visible_count: int
+    pinned_skipped: int
+    candidate_count: int
+    purged_count: int
+    handoff_paths: tuple[Path, ...]
+    lines: tuple[str, ...]
+    errors: tuple[str, ...]
+
+
 class LifeboatController:
     def __init__(self) -> None:
         self.config: AppConfig = load_config(create=True)
@@ -268,6 +279,17 @@ class LifeboatController:
             return None, "Session file is missing. Lifeboat can show indexed metadata, but cannot read the transcript."
         return RecoveryContext(self.agent_key, session_id, path, row), None
 
+    def purge_context(self, row: dict[str, Any]) -> tuple[RecoveryContext | None, str | None]:
+        if self.agent_key != "codex":
+            return self.recovery_context(row)
+        session_id = str(row.get("id") or "")
+        path = self.store.session_file_path(row)
+        if not session_id:
+            return None, "Selected session has no session id."
+        if not path:
+            return None, "No session file path is recorded. Only indexed metadata is recoverable."
+        return RecoveryContext(self.agent_key, session_id, path, row), None
+
     def write_handoff(self, row: dict[str, Any], *, scrub_profile: str, target_agent: str):
         context, error = self.recovery_context(row)
         if not context:
@@ -451,7 +473,7 @@ class LifeboatController:
         return True, sid
 
     def purge_lines(self, row: dict[str, Any], *, dry_run: bool) -> tuple[list[str] | None, str | None]:
-        context, error = self.recovery_context(row)
+        context, error = self.purge_context(row)
         if not context:
             return None, error
         if self.agent_key == "claude":
@@ -474,15 +496,104 @@ class LifeboatController:
         scrub_profile: str,
         target_agent: str,
     ):
-        context, error = self.recovery_context(row)
+        context, error = self.purge_context(row)
         if not context:
             return None, None, error
-        handoff = write_agent_handoff(self.config, context, scrub_profile=scrub_profile, target_agent=target_agent)
+        handoff = None
+        if context.session_file_path.is_file():
+            handoff = write_agent_handoff(self.config, context, scrub_profile=scrub_profile, target_agent=target_agent)
         lines, purge_error = self.purge_lines(row, dry_run=False)
         return handoff, lines, purge_error
 
     def bulk_plan(self, rows: list[dict[str, Any]]) -> list[str]:
         return bulk_cleanup_plan(rows, self.row_states)
+
+    def bulk_purge_candidates(self, rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+        pins = self.pins.load()
+        candidates: list[dict[str, Any]] = []
+        pinned_skipped = 0
+        for row in rows:
+            session_id = str(row.get("id") or "")
+            if not session_id:
+                continue
+            if self.pin_key(session_id) in pins:
+                pinned_skipped += 1
+                continue
+            candidates.append(row)
+        return candidates, pinned_skipped
+
+    def bulk_purge_fingerprint(self, rows: list[dict[str, Any]]) -> str:
+        candidates, _pinned_skipped = self.bulk_purge_candidates(rows)
+        return "|".join(str(row.get("id") or "") for row in candidates)
+
+    def bulk_purge_preview(self, rows: list[dict[str, Any]]) -> BulkPurgeResult:
+        candidates, pinned_skipped = self.bulk_purge_candidates(rows)
+        lines = [
+            "Dry run only. Nothing was deleted.",
+            f"visible sessions: {len(rows)}",
+            f"pinned sessions skipped: {pinned_skipped}",
+            f"purge candidates: {len(candidates)}",
+        ]
+        errors: list[str] = []
+        for row in candidates:
+            session_id = str(row.get("id") or "")
+            preview_lines, error = self.purge_lines(row, dry_run=True)
+            if error:
+                errors.append(f"{session_id}: {error}")
+                continue
+            lines.extend(f"{session_id}: {line}" for line in (preview_lines or []))
+        return BulkPurgeResult(
+            visible_count=len(rows),
+            pinned_skipped=pinned_skipped,
+            candidate_count=len(candidates),
+            purged_count=0,
+            handoff_paths=(),
+            lines=tuple(lines),
+            errors=tuple(errors),
+        )
+
+    def bulk_purge_after_handoff(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        scrub_profile: str,
+        target_agent: str,
+    ) -> BulkPurgeResult:
+        candidates, pinned_skipped = self.bulk_purge_candidates(rows)
+        lines = [
+            f"visible sessions: {len(rows)}",
+            f"pinned sessions skipped: {pinned_skipped}",
+            f"purge candidates: {len(candidates)}",
+        ]
+        errors: list[str] = []
+        handoff_paths: list[Path] = []
+        purged_count = 0
+        for row in candidates:
+            session_id = str(row.get("id") or "")
+            handoff, purge_lines, error = self.purge_after_handoff(
+                row,
+                scrub_profile=scrub_profile,
+                target_agent=target_agent,
+            )
+            if error:
+                errors.append(f"{session_id}: {error}")
+                continue
+            purged_count += 1
+            if handoff:
+                handoff_paths.append(handoff.path)
+                lines.append(f"{session_id}: recovery handoff: {handoff.path}")
+            else:
+                lines.append(f"{session_id}: recovery handoff: not written; session file was missing")
+            lines.extend(f"{session_id}: {line}" for line in (purge_lines or []))
+        return BulkPurgeResult(
+            visible_count=len(rows),
+            pinned_skipped=pinned_skipped,
+            candidate_count=len(candidates),
+            purged_count=purged_count,
+            handoff_paths=tuple(handoff_paths),
+            lines=tuple(lines),
+            errors=tuple(errors),
+        )
 
     def backups_for(self, row: dict[str, Any]) -> tuple[list[BackupInfo], str | None]:
         context, error = self.recovery_context(row)

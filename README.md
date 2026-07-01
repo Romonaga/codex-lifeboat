@@ -153,6 +153,7 @@ b        show bulk cleanup plan
 p        toggle pin
 x        dry-run purge
 ctrl+x   purge after two-step confirmation
+ctrl+z   purge all unpinned visible sessions after two-step confirmation
 u        preview latest backup restore
 ctrl+u   restore latest backup after preview
 d        doctor report

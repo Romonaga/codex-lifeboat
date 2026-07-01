@@ -130,6 +130,7 @@ def session_details_markdown(detail: SessionDetail, *, store_display_name: str) 
 - `p` toggle pin
 - `x` dry-run purge
 - `ctrl+x` purge after two-step confirmation
+- `ctrl+z` purge all unpinned visible sessions after two-step confirmation
 - `u` preview latest backup restore
 - `ctrl+u` restore latest backup after preview
 - `d` show doctor report
@@ -303,6 +304,45 @@ def bulk_cleanup_markdown(lines: list[str]) -> str:
     return body + "\n".join(f"- `{line}`" for line in lines[:200])
 
 
+def bulk_purge_preview_markdown(result: Any) -> str:
+    if result.candidate_count == 0:
+        return (
+            "# Bulk Purge Preview\n\n"
+            "No unpinned visible sessions are eligible for bulk purge.\n\n"
+            f"- Visible sessions: `{result.visible_count}`\n"
+            f"- Pinned sessions skipped: `{result.pinned_skipped}`"
+        )
+    body = (
+        "# Bulk Purge Preview\n\n"
+        "Press `ctrl+z` again to purge every unpinned visible session listed here. "
+        "Readable sessions will get a recovery handoff first.\n\n"
+    )
+    return body + bulk_purge_lines_markdown(result)
+
+
+def bulk_purge_complete_markdown(result: Any) -> str:
+    body = (
+        "# Bulk Purge Complete\n\n"
+        f"- Purged sessions: `{result.purged_count}`\n"
+        f"- Recovery handoffs written: `{len(result.handoff_paths)}`\n"
+        f"- Pinned sessions skipped: `{result.pinned_skipped}`\n"
+        f"- Errors: `{len(result.errors)}`\n\n"
+    )
+    return body + bulk_purge_lines_markdown(result)
+
+
+def bulk_purge_lines_markdown(result: Any) -> str:
+    lines = [f"- `{line}`" for line in list(result.lines)[:400]]
+    if len(result.lines) > 400:
+        lines.append(f"- `... truncated {len(result.lines) - 400} additional lines ...`")
+    if result.errors:
+        lines.extend(["", "## Errors", ""])
+        lines.extend(f"- `{error}`" for error in result.errors[:80])
+        if len(result.errors) > 80:
+            lines.append(f"- `... truncated {len(result.errors) - 80} additional errors ...`")
+    return "\n".join(lines)
+
+
 def injection_markdown(result: Any) -> str:
     return (
         "# Handoff Injected\n\n"
@@ -319,7 +359,12 @@ def purge_preview_markdown(lines: list[str]) -> str:
 
 
 def purge_complete_markdown(handoff_path: Any, lines: list[str]) -> str:
-    return "# Purge Complete\n\n" f"- Recovery handoff: `{handoff_path}`\n" + "\n".join(f"- {line}" for line in lines)
+    handoff_line = (
+        f"- Recovery handoff: `{handoff_path}`"
+        if handoff_path
+        else "- Recovery handoff: not written; session file was missing"
+    )
+    return "# Purge Complete\n\n" + handoff_line + "\n" + "\n".join(f"- {line}" for line in lines)
 
 
 def restore_preview_markdown(session_file: Any, backups: list[Any]) -> str:
